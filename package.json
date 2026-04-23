@@ -71,6 +71,14 @@
     "ex-flow": "^1.0.4",
     "exsorted": "^1.1.0"
   },
+  "peerDependenciesMeta": {
+    "ex-flow": {
+      "optional": true
+    },
+    "exsorted": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "@types/node": "^25.5.0",
