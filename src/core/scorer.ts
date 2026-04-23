@@ -70,6 +70,18 @@ function normalise(s: string, caseSensitive = false): string {
   return caseSensitive ? s : s.toLowerCase();
 }
 
+/**
+ * Low-level scoring primitives used internally by the search pipeline.
+ * Exposed for custom use cases — e.g. highlighting, custom ranking, or
+ * pre-filtering before calling `search()`.
+ *
+ * All string comparisons are **case-insensitive by default**.
+ * Pass `caseSensitive: true` to any method to opt in to exact-case matching.
+ *
+ * @example
+ * Scorer.levenshtein('Somchai', 'Somchay'); // 1
+ * Scorer.fuzzy('Chiangmai', 'Chiengmai');   // ~49
+ */
 export const Scorer: ScorerAPI = {
   exact(a, b, caseSensitive = false): number {
     return normalise(a, caseSensitive) === normalise(b, caseSensitive) ? 100 : 0;
