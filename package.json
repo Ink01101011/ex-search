@@ -69,13 +69,17 @@
   },
   "peerDependencies": {
     "ex-flow": "^1.0.4",
-    "exsorted": "^1.1.0"
+    "exsorted": "^1.1.0",
+    "react": "^18.2.0 || ^19.0.0"
   },
   "peerDependenciesMeta": {
     "ex-flow": {
       "optional": true
     },
     "exsorted": {
+      "optional": true
+    },
+    "react": {
       "optional": true
     }
   },
