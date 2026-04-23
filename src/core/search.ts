@@ -1,5 +1,5 @@
 import { radixSort, timSort } from 'exsorted';
-import type { SearchConfig, SearchResult, FieldMatch } from './types';
+import type { SearchConfig, SearchResult, FieldMatch } from '../types';
 import { Scorer } from './scorer';
 
 // ---------------------------------------------------------------------------
@@ -90,6 +90,25 @@ function normaliseConfig<T>(config: SearchConfig<T>): Required<SearchConfig<T>> 
 // Functional API
 // ---------------------------------------------------------------------------
 
+/**
+ * One-shot search over an array of items.
+ *
+ * Runs the four-tier scoring pipeline (exact → startsWith → contains → fuzzy)
+ * on every item, drops results whose score falls below `config.threshold`, and
+ * returns the survivors sorted by score descending.
+ *
+ * Returns an empty array when `query` is blank or whitespace-only.
+ *
+ * @param data - Array of items to search.
+ * @param query - The search string typed by the user.
+ * @param config - Field weights, threshold, fuzzy distance, and sort algorithm.
+ *
+ * @example
+ * const results = search(branches, 'สยาม', {
+ *   keys: [{ name: 'name', weight: 1.0 }, { name: 'address', weight: 0.5 }],
+ *   threshold: 0.3,
+ * });
+ */
 export function search<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[] {
   if (!query.trim()) return [];
 
@@ -109,6 +128,20 @@ export function search<T>(data: T[], query: string, config: SearchConfig<T>): Se
 // Class API
 // ---------------------------------------------------------------------------
 
+/**
+ * Stateful searcher. Create once, call `search()` or `searchAsync()` as many
+ * times as needed without re-allocating the instance.
+ *
+ * Use `createSearch()` as a factory alternative to `new ExSearch()`.
+ *
+ * @example
+ * const searcher = createSearch<Branch>({
+ *   keys: [{ name: 'name', weight: 1.0 }],
+ *   threshold: 0.3,
+ * });
+ * searcher.setData(branches);
+ * const results = searcher.search('สยาม');
+ */
 export class ExSearch<T> {
   private _config: Required<SearchConfig<T>>;
   private _data: T[] = [];
@@ -117,20 +150,35 @@ export class ExSearch<T> {
     this._config = normaliseConfig(config);
   }
 
+  /** Replace the entire dataset. Returns `this` for chaining. */
   setData(data: T[]): this {
     this._data = data;
     return this;
   }
 
+  /**
+   * Merge a partial config update into the current configuration.
+   * Unspecified fields keep their previous value. Returns `this` for chaining.
+   */
   updateConfig(config: Partial<SearchConfig<T>>): this {
     this._config = normaliseConfig({ ...this._config, ...config });
     return this;
   }
 
+  /**
+   * Synchronous search. Suitable for datasets up to ~50 000 records in
+   * browser environments or any size in Node.js.
+   */
   search(query: string): SearchResult<T>[] {
     return search(this._data, query, this._config);
   }
 
+  /**
+   * Async search. When `config.useWorker` is `true` and `Worker` is available,
+   * scoring runs in a dedicated Worker thread and this Promise resolves once
+   * the Worker posts back results. Falls back to synchronous execution
+   * otherwise (Node.js, SSR, or when Worker is unavailable).
+   */
   async searchAsync(query: string): Promise<SearchResult<T>[]> {
     if (!this._config.useWorker || typeof Worker === 'undefined') {
       return this.search(query);
@@ -143,6 +191,7 @@ export class ExSearch<T> {
 // Factory
 // ---------------------------------------------------------------------------
 
+/** Factory that returns a pre-configured `ExSearch` instance. Equivalent to `new ExSearch(config)`. */
 export function createSearch<T>(config: SearchConfig<T>): ExSearch<T> {
   return new ExSearch(config);
 }

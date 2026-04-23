@@ -1,4 +1,4 @@
-import { search, createSearch } from '../src/search';
+import { search, createSearch } from '../src/core/search';
 
 interface Branch {
   id: string;

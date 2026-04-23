@@ -1,4 +1,4 @@
-import { Scorer } from '../src/scorer';
+import { Scorer } from '../src/core/scorer';
 
 describe('Scorer.levenshtein', () => {
   it('returns 0 for identical strings', () => {
