@@ -6,72 +6,48 @@ import { Scorer } from './scorer';
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-const SCORE_PRECISION = 1_000_000; // radixSort key: score × 1_000_000 → integer
+// radixSort key: score × 1_000_000 → integer, negated for descending order
+const SCORE_PRECISION = 1_000_000;
 
-/** Score a single field value against the query. */
 function scoreField(
   value: unknown,
-  query: string,
+  normQuery: string,
   weight: number,
-  config: Pick<SearchConfig<unknown>, 'caseSensitive' | 'fuzzyMaxDistance'>,
+  caseSensitive: boolean,
+  fmd: number,
 ): Pick<FieldMatch, 'matchType' | 'rawScore' | 'fieldScore'> {
-  const text = String(value ?? '');
-  const cs = config.caseSensitive;
-  const fmd = config.fuzzyMaxDistance;
+  const text = caseSensitive ? String(value ?? '') : String(value ?? '').toLowerCase();
 
-  let rawScore: number;
-  let matchType: FieldMatch['matchType'];
+  if (text === normQuery)
+    return { matchType: 'exact', rawScore: 100, fieldScore: 100 * weight };
+  if (text.startsWith(normQuery))
+    return { matchType: 'startsWith', rawScore: 80, fieldScore: 80 * weight };
+  if (text.includes(normQuery))
+    return { matchType: 'contains', rawScore: 65, fieldScore: 65 * weight };
 
-  const exact = Scorer.exact(text, query, cs);
-  if (exact > 0) {
-    rawScore = exact;
-    matchType = 'exact';
-  } else {
-    const sw = Scorer.startsWith(text, query, cs);
-    if (sw > 0) {
-      rawScore = sw;
-      matchType = 'startsWith';
-    } else {
-      const ct = Scorer.contains(text, query, cs);
-      if (ct > 0) {
-        rawScore = ct;
-        matchType = 'contains';
-      } else {
-        const fz = Scorer.fuzzy(text, query, fmd, cs);
-        if (fz > 0) {
-          rawScore = fz;
-          matchType = 'fuzzy';
-        } else {
-          rawScore = 0;
-          matchType = 'none';
-        }
-      }
-    }
+  const dist = Scorer.levenshtein(text, normQuery);
+  if (dist <= fmd) {
+    const rawScore = (1 - dist / Math.max(text.length, normQuery.length)) * 55;
+    return { matchType: 'fuzzy', rawScore, fieldScore: rawScore * weight };
   }
 
-  return { matchType, rawScore, fieldScore: rawScore * weight };
+  return { matchType: 'none', rawScore: 0, fieldScore: 0 };
 }
 
-/** Compute a SearchResult for one data item. Returns null if below threshold. */
 function scoreItem<T>(
   item: T,
-  query: string,
+  normQuery: string,
   config: Required<SearchConfig<T>>,
 ): SearchResult<T> | null {
   const fieldMatches: FieldMatch[] = config.keys.map((k) => {
     const { matchType, rawScore, fieldScore } = scoreField(
       item[k.name],
-      query,
+      normQuery,
       k.weight,
-      config,
+      config.caseSensitive,
+      config.fuzzyMaxDistance,
     );
-    return {
-      key: String(k.name),
-      weight: k.weight,
-      matchType,
-      rawScore,
-      fieldScore,
-    };
+    return { key: String(k.name), weight: k.weight, matchType, rawScore, fieldScore };
   });
 
   const bestFieldScore = Math.max(...fieldMatches.map((f) => f.fieldScore));
@@ -81,8 +57,7 @@ function scoreItem<T>(
 
   return {
     ...(item as object),
-    // exFlowPriority mirrors the score so results can be piped into ex-flow
-    exFlowPriority: Math.round(score * 100),
+    exFlowPriority: Math.round(bestFieldScore),
     score,
     fieldMatches,
   } as SearchResult<T>;
@@ -100,12 +75,9 @@ function sortDescending<T>(
 
   if (algorithm === 'radix') {
     // radixSort is ascending — negate key to get descending order
-    return radixSort(results, (item) =>
-      Math.round((1 - item.score) * SCORE_PRECISION),
-    );
+    return radixSort(results, (item) => Math.round((1 - item.score) * SCORE_PRECISION));
   }
 
-  // timSort with comparator — stable, descending
   return timSort(results, (a, b) => b.score - a.score);
 }
 
@@ -136,10 +108,11 @@ export function search<T>(
   if (!query.trim()) return [];
 
   const cfg = normaliseConfig(config);
+  const normQuery = cfg.caseSensitive ? query : query.toLowerCase();
   const scored: SearchResult<T>[] = [];
 
   for (const item of data) {
-    const result = scoreItem(item, query, cfg);
+    const result = scoreItem(item, normQuery, cfg);
     if (result !== null) scored.push(result);
   }
 
@@ -194,6 +167,9 @@ export function createSearch<T>(config: SearchConfig<T>): ExSearch<T> {
 // The worker receives a serialised payload, runs the scoring pipeline,
 // and posts back the results. Only plain-serialisable data crosses the
 // boundary (scores, fieldMatches, and the original item properties).
+//
+// normQuery is pre-normalised by the caller so the worker does not need
+// to re-apply case normalisation to the query on every item.
 
 function runInWorker<T>(
   data: T[],
@@ -217,14 +193,15 @@ function runInWorker<T>(
       reject(e);
     };
 
-    worker.postMessage({ data, query, config });
+    const normQuery = config.caseSensitive ? query : query.toLowerCase();
+    worker.postMessage({ data, normQuery, config });
   });
 }
 
 /**
  * Inlined worker source.
- * Contains a self-contained copy of the scoring logic (no module imports)
- * so it runs in an isolated Worker context without a bundler.
+ * Self-contained copy of the scoring logic with no module imports so it
+ * runs in an isolated Worker context without a bundler.
  */
 const WORKER_SOURCE = `
 (${workerEntry.toString()})();
@@ -233,42 +210,42 @@ const WORKER_SOURCE = `
 function workerEntry() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   self.onmessage = function (e: MessageEvent<any>) {
-    const { data, query, config } = e.data;
+    const { data, normQuery, config } = e.data;
 
-    // Inline levenshtein (Myers bitwise)
+    // Myers bit-parallel Levenshtein — two-variable Pv/Mv form
     function levenshtein(a: string, b: string): number {
       if (a === b) return 0;
       if (!a.length) return b.length;
       if (!b.length) return a.length;
       if (a.length > b.length) { const t = a; a = b; b = t; }
       const m = a.length;
-      const pm = new Map<string, number>();
-      for (let i = 0; i < m; i++) pm.set(a[i], (pm.get(a[i]) ?? 0) | (1 << i));
-      let x = (1 << m) - 1, score = m;
+      const peq = new Map<string, number>();
+      for (let i = 0; i < m; i++) peq.set(a[i], (peq.get(a[i]) ?? 0) | (1 << i));
+      let Pv = (1 << m) - 1, Mv = 0, score = m;
       for (let j = 0; j < b.length; j++) {
-        const eq = pm.get(b[j]) ?? 0;
-        const xv = x & eq;
-        const xh = (((xv + x) & x) | xv) >>> 0;
-        const ph = xh | ~(xv | x);
-        const mh = x & xv;
-        if (ph & (1 << (m - 1))) score++;
-        if (mh & (1 << (m - 1))) score--;
-        x = ((x << 1) | 1) & ~(((mh << 1) | 1) >>> 0) | (ph << 1) | 1;
-        x = x >>> 0;
+        const Eq = peq.get(b[j]) ?? 0;
+        const Xv = Eq | Mv;
+        const Xh = (((Eq & Pv) + Pv) ^ Pv) | Eq;
+        let Ph = Mv | ~(Xh | Pv);
+        let Mh = Pv & Xh;
+        if ((Ph >>> (m - 1)) & 1) score++;
+        if ((Mh >>> (m - 1)) & 1) score--;
+        Ph = ((Ph << 1) | 1) >>> 0;
+        Mh = (Mh << 1) >>> 0;
+        Pv = (Mh | ~(Xv | Ph)) >>> 0;
+        Mv = (Ph & Xv) >>> 0;
       }
       return score;
     }
 
-    function norm(s: string, cs: boolean) { return cs ? s : s.toLowerCase(); }
-
-    function scoreField(value: unknown, query: string, weight: number, cs: boolean, fmd: number) {
-      const text = String(value ?? '');
-      const t = norm(text, cs), q = norm(query, cs);
-      if (t === q)           return { matchType: 'exact',      rawScore: 100, fieldScore: 100 * weight };
-      if (t.startsWith(q))   return { matchType: 'startsWith', rawScore: 80,  fieldScore: 80 * weight };
-      const dist = levenshtein(t, q);
+    function scoreField(value: unknown, normQuery: string, weight: number, cs: boolean, fmd: number) {
+      const text = cs ? String(value ?? '') : String(value ?? '').toLowerCase();
+      if (text === normQuery)        return { matchType: 'exact',      rawScore: 100, fieldScore: 100 * weight };
+      if (text.startsWith(normQuery)) return { matchType: 'startsWith', rawScore: 80,  fieldScore: 80 * weight };
+      if (text.includes(normQuery))   return { matchType: 'contains',   rawScore: 65,  fieldScore: 65 * weight };
+      const dist = levenshtein(text, normQuery);
       if (dist <= fmd) {
-        const raw = (1 - dist / Math.max(t.length, q.length)) * 70;
+        const raw = (1 - dist / Math.max(text.length, normQuery.length)) * 55;
         return { matchType: 'fuzzy', rawScore: raw, fieldScore: raw * weight };
       }
       return { matchType: 'none', rawScore: 0, fieldScore: 0 };
@@ -278,19 +255,19 @@ function workerEntry() {
     for (const item of data) {
       const fieldMatches = config.keys.map((k: { name: string; weight: number }) => {
         const { matchType, rawScore, fieldScore } = scoreField(
-          (item as Record<string, unknown>)[k.name], query, k.weight, config.caseSensitive, config.fuzzyMaxDistance
+          (item as Record<string, unknown>)[k.name], normQuery, k.weight, config.caseSensitive, config.fuzzyMaxDistance,
         );
         return { key: k.name, weight: k.weight, matchType, rawScore, fieldScore };
       });
-      const best = Math.max(...fieldMatches.map((f: { fieldScore: number }) => f.fieldScore));
-      const score = best / 100;
+      const bestFieldScore = Math.max(...fieldMatches.map((f: { fieldScore: number }) => f.fieldScore));
+      const score = bestFieldScore / 100;
       if (score >= config.threshold) {
-        results.push({ ...item, exFlowPriority: Math.round(score * 100), score, fieldMatches });
+        results.push({ ...item, exFlowPriority: Math.round(bestFieldScore), score, fieldMatches });
       }
     }
 
     results.sort((a: unknown, b: unknown) =>
-      (b as { score: number }).score - (a as { score: number }).score
+      (b as { score: number }).score - (a as { score: number }).score,
     );
 
     self.postMessage(results);
