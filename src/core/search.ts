@@ -1,5 +1,5 @@
 import { radixSort, timSort } from 'exsorted';
-import type { SearchConfig, SearchResult, FieldMatch } from './types';
+import type { SearchConfig, SearchResult, FieldMatch } from '../types';
 import { Scorer } from './scorer';
 
 // ---------------------------------------------------------------------------

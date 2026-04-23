@@ -1,4 +1,4 @@
-import type { ScorerAPI } from './types';
+import type { ScorerAPI } from '../types';
 
 // ---------------------------------------------------------------------------
 // Levenshtein — Myers' bit-parallel algorithm
