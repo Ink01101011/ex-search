@@ -5,10 +5,11 @@
  *
  * Scoring pipeline per field
  * ──────────────────────────
- *  1. Exact match    → rawScore = 100
- *  2. Starts-with    → rawScore = 80
- *  3. Fuzzy (Myers)  → rawScore = (1 − dist / maxLen) × 70
- *  4. No match       → rawScore = 0
+ *  1. Exact      → rawScore = 100
+ *  2. StartsWith → rawScore = 80
+ *  3. Contains   → rawScore = 65
+ *  4. Fuzzy      → rawScore = (1 − dist / maxLen) × 55
+ *  5. No match   → rawScore = 0
  *
  *  fieldScore = rawScore × weight
  *  finalScore = max(fieldScore) / 100   → normalised 0.0–1.0
