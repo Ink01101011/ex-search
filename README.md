@@ -16,10 +16,11 @@ Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` wi
 - **Myers bit-parallel Levenshtein** — O(n × ⌈m/31⌉) fuzzy distance; effectively O(n) for strings under 31 characters
 - **Pluggable sort backend** — choose `radixSort` (O(n), best for large result sets) or `timSort` (O(n log n) stable)
 - **Web Worker support** — offload scoring to a Worker thread in browser environments to keep the UI responsive
+- **React hooks** — `useExSearch` (sync, SSR-safe) and `useExSearchAsync` (Worker-backed) via `ex-search/react`
 - **ex-flow compatible** — every result includes `exFlowPriority` mirroring the normalized score
 - **Fully typed** — complete TypeScript generics; no `any` in public API
 - **Dual module support** — ships as both ESM and CommonJS
-- **Tree-shakeable** — import only `Scorer` utilities if that is all you need
+- **Tree-shakeable** — import only `Scorer` utilities or the React hooks subpath independently
 
 ## Scoring Concept
 
@@ -173,7 +174,78 @@ Scorer.contains('สาขาสยามพารากอน', 'สยาม')
 Scorer.fuzzy('Chiangmai', 'Chiengmai'); // ~49  (dist=2, maxLen=9 → (1−2/9)×55)
 ```
 
-### 5. Piping results into ex-flow
+### 5. React hooks
+
+Install `react` as a peer dependency (already required if you are in a React project), then import from the `ex-search/react` subpath.
+
+#### `useExSearch` — synchronous, SSR-safe
+
+```typescript
+import { useMemo } from 'react';
+import { useExSearch } from 'ex-search/react';
+
+function BranchList({ branches }: { branches: Branch[] }) {
+  const [query, setQuery] = useState('');
+
+  // Wrap config in useMemo so its reference stays stable across renders
+  const config = useMemo(
+    () => ({
+      keys: [
+        { name: 'name' as const, weight: 1.0 },
+        { name: 'address' as const, weight: 0.5 },
+      ],
+      threshold: 0.3,
+    }),
+    [],
+  );
+
+  const results = useExSearch(branches, query, config);
+
+  return (
+    <>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      {results.map((r) => <div key={r.id}>{r.name} — score {r.score.toFixed(2)}</div>)}
+    </>
+  );
+}
+```
+
+`useExSearch` runs synchronously inside `useMemo`, so results are ready on the **first server render** — no loading state or layout shift.
+
+#### `useExSearchAsync` — Worker-backed, large datasets
+
+```typescript
+import { useExSearchAsync } from 'ex-search/react';
+
+function BranchList({ branches }: { branches: Branch[] }) {
+  const [query, setQuery] = useState('');
+
+  const config = useMemo(
+    () => ({
+      keys: [{ name: 'name' as const, weight: 1.0 }],
+      threshold: 0.3,
+      useWorker: true, // scoring runs off the main thread in browsers
+    }),
+    [],
+  );
+
+  const { results, loading } = useExSearchAsync(branches, query, config);
+
+  return (
+    <>
+      <input value={query} onChange={(e) => setQuery(e.target.value)} />
+      {loading && <span>Searching…</span>}
+      {results.map((r) => <div key={r.id}>{r.name}</div>)}
+    </>
+  );
+}
+```
+
+`useExSearchAsync` uses `useEffect`, so it is **skipped during SSR** — the initial render returns `{ results: [], loading: false }`. An empty or whitespace-only query resets results immediately without triggering the `loading` state. When `Worker` is unavailable (Node.js, SSR, or when `useWorker` is `false`) the hook falls back to synchronous execution transparently.
+
+**Config stability note** — both hooks list `config` as a `useMemo`/`useEffect` dependency. If you create the config object inline (e.g. `useExSearch(data, query, { keys: [...] })`), a new object is produced on every render, causing the hook to re-run even when nothing changed. Wrapping the config in `useMemo` prevents this.
+
+### 6. Piping results into ex-flow
 
 Every `SearchResult<T>` carries `exFlowPriority = Math.round(score × 100)`, which is the field `ex-flow` reads for priority ordering. No transformation is needed.
 
@@ -244,6 +316,34 @@ class ExSearch<T> {
 **`search(query)`** — Synchronous. Suitable for datasets up to ~50 000 records in browser environments or any size in Node.js.
 
 **`searchAsync(query)`** — When `useWorker: true` and the environment supports `Worker`, scoring runs in a dedicated Worker thread. Falls back to synchronous execution otherwise.
+
+---
+
+### `useExSearch<T>(data, query, config)` · `ex-search/react`
+
+Synchronous search hook. Wraps `search()` in `useMemo`; re-runs when any dependency changes.
+
+```typescript
+function useExSearch<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[];
+```
+
+SSR-safe — executes during server rendering. Returns `[]` for blank queries.
+
+---
+
+### `useExSearchAsync<T>(data, query, config)` · `ex-search/react`
+
+Async search hook. Delegates to a Web Worker when `config.useWorker` is `true` and `Worker` is available; falls back to synchronous otherwise.
+
+```typescript
+function useExSearchAsync<T>(
+  data: T[],
+  query: string,
+  config: SearchConfig<T>,
+): { results: SearchResult<T>[]; loading: boolean };
+```
+
+SSR-safe — `useEffect` is skipped on the server; initial state is `{ results: [], loading: false }`. Blank queries skip the loading state entirely.
 
 ---
 
@@ -353,6 +453,14 @@ The Myers bit-parallel Levenshtein runs at O(n × ⌈m/31⌉) using JavaScript's
 import { search, createSearch, ExSearch, Scorer } from 'ex-search';
 ```
 
+### React hooks
+
+```typescript
+import { useExSearch, useExSearchAsync } from 'ex-search/react';
+```
+
+The `ex-search/react` subpath is tree-shakeable from the core bundle. It requires `react` as a peer dependency and is safe to use in both CSR and SSR environments (Next.js App Router, Remix, etc.).
+
 ### Types-only import
 
 ```typescript
@@ -375,12 +483,13 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 
 ## Peer Dependencies
 
-| Package    | Version  | Role                                                          |
-| ---------- | -------- | ------------------------------------------------------------- |
-| `exsorted` | `^1.1.0` | Provides `radixSort` and `timSort` for ranking scored results |
-| `ex-flow`  | `^1.0.4` | `ExFlowResultItem` shape that `SearchResult<T>` mirrors       |
+| Package    | Version                | Required for            |
+| ---------- | ---------------------- | ----------------------- |
+| `exsorted` | `^1.1.0`               | Core search and sorting |
+| `ex-flow`  | `^1.0.4`               | `exFlowPriority` field  |
+| `react`    | `^18.2.0` or `^19.0.0` | `ex-search/react` hooks |
 
-Both packages must be installed in the consuming project. They are not bundled into `ex-search`.
+All peer dependencies are optional — install only what you use. They are not bundled into `ex-search`.
 
 ## Compatibility
 
