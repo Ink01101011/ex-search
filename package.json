@@ -1,6 +1,6 @@
 {
   "name": "ex-search",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Scoring-based fuzzy search with Myers Levenshtein distance and radix/tim sort ranking. Part of the ex-* ecosystem.",
   "keywords": [
     "search",
