@@ -123,12 +123,7 @@ export interface ScorerAPI {
    *   score = (1 - distance / max(a.length, b.length)) × 55
    * Returns 0 if distance > fuzzyMaxDistance.
    */
-  fuzzy(
-    a: string,
-    b: string,
-    fuzzyMaxDistance?: number,
-    caseSensitive?: boolean,
-  ): number;
+  fuzzy(a: string, b: string, fuzzyMaxDistance?: number, caseSensitive?: boolean): number;
 
   /**
    * Raw Levenshtein distance computed via the bitwise Myers algorithm.

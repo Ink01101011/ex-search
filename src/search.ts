@@ -18,12 +18,9 @@ function scoreField(
 ): Pick<FieldMatch, 'matchType' | 'rawScore' | 'fieldScore'> {
   const text = caseSensitive ? String(value ?? '') : String(value ?? '').toLowerCase();
 
-  if (text === normQuery)
-    return { matchType: 'exact', rawScore: 100, fieldScore: 100 * weight };
-  if (text.startsWith(normQuery))
-    return { matchType: 'startsWith', rawScore: 80, fieldScore: 80 * weight };
-  if (text.includes(normQuery))
-    return { matchType: 'contains', rawScore: 65, fieldScore: 65 * weight };
+  if (text === normQuery) return { matchType: 'exact', rawScore: 100, fieldScore: 100 * weight };
+  if (text.startsWith(normQuery)) return { matchType: 'startsWith', rawScore: 80, fieldScore: 80 * weight };
+  if (text.includes(normQuery)) return { matchType: 'contains', rawScore: 65, fieldScore: 65 * weight };
 
   const dist = Scorer.levenshtein(text, normQuery);
   if (dist <= fmd) {
@@ -34,11 +31,7 @@ function scoreField(
   return { matchType: 'none', rawScore: 0, fieldScore: 0 };
 }
 
-function scoreItem<T>(
-  item: T,
-  normQuery: string,
-  config: Required<SearchConfig<T>>,
-): SearchResult<T> | null {
+function scoreItem<T>(item: T, normQuery: string, config: Required<SearchConfig<T>>): SearchResult<T> | null {
   const fieldMatches: FieldMatch[] = config.keys.map((k) => {
     const { matchType, rawScore, fieldScore } = scoreField(
       item[k.name],
@@ -67,10 +60,7 @@ function scoreItem<T>(
 // Sorting
 // ---------------------------------------------------------------------------
 
-function sortDescending<T>(
-  results: SearchResult<T>[],
-  algorithm: 'radix' | 'tim',
-): SearchResult<T>[] {
+function sortDescending<T>(results: SearchResult<T>[], algorithm: 'radix' | 'tim'): SearchResult<T>[] {
   if (results.length === 0) return results;
 
   if (algorithm === 'radix') {
@@ -100,11 +90,7 @@ function normaliseConfig<T>(config: SearchConfig<T>): Required<SearchConfig<T>> 
 // Functional API
 // ---------------------------------------------------------------------------
 
-export function search<T>(
-  data: T[],
-  query: string,
-  config: SearchConfig<T>,
-): SearchResult<T>[] {
+export function search<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[] {
   if (!query.trim()) return [];
 
   const cfg = normaliseConfig(config);
@@ -171,11 +157,7 @@ export function createSearch<T>(config: SearchConfig<T>): ExSearch<T> {
 // normQuery is pre-normalised by the caller so the worker does not need
 // to re-apply case normalisation to the query on every item.
 
-function runInWorker<T>(
-  data: T[],
-  query: string,
-  config: Required<SearchConfig<T>>,
-): Promise<SearchResult<T>[]> {
+function runInWorker<T>(data: T[], query: string, config: Required<SearchConfig<T>>): Promise<SearchResult<T>[]> {
   return new Promise((resolve, reject) => {
     const blob = new Blob([WORKER_SOURCE], { type: 'application/javascript' });
     const url = URL.createObjectURL(blob);
@@ -217,11 +199,17 @@ function workerEntry() {
       if (a === b) return 0;
       if (!a.length) return b.length;
       if (!b.length) return a.length;
-      if (a.length > b.length) { const t = a; a = b; b = t; }
+      if (a.length > b.length) {
+        const t = a;
+        a = b;
+        b = t;
+      }
       const m = a.length;
       const peq = new Map<string, number>();
       for (let i = 0; i < m; i++) peq.set(a[i], (peq.get(a[i]) ?? 0) | (1 << i));
-      let Pv = (1 << m) - 1, Mv = 0, score = m;
+      let Pv = (1 << m) - 1,
+        Mv = 0,
+        score = m;
       for (let j = 0; j < b.length; j++) {
         const Eq = peq.get(b[j]) ?? 0;
         const Xv = Eq | Mv;
@@ -240,9 +228,9 @@ function workerEntry() {
 
     function scoreField(value: unknown, normQuery: string, weight: number, cs: boolean, fmd: number) {
       const text = cs ? String(value ?? '') : String(value ?? '').toLowerCase();
-      if (text === normQuery)        return { matchType: 'exact',      rawScore: 100, fieldScore: 100 * weight };
-      if (text.startsWith(normQuery)) return { matchType: 'startsWith', rawScore: 80,  fieldScore: 80 * weight };
-      if (text.includes(normQuery))   return { matchType: 'contains',   rawScore: 65,  fieldScore: 65 * weight };
+      if (text === normQuery) return { matchType: 'exact', rawScore: 100, fieldScore: 100 * weight };
+      if (text.startsWith(normQuery)) return { matchType: 'startsWith', rawScore: 80, fieldScore: 80 * weight };
+      if (text.includes(normQuery)) return { matchType: 'contains', rawScore: 65, fieldScore: 65 * weight };
       const dist = levenshtein(text, normQuery);
       if (dist <= fmd) {
         const raw = (1 - dist / Math.max(text.length, normQuery.length)) * 55;
@@ -255,7 +243,11 @@ function workerEntry() {
     for (const item of data) {
       const fieldMatches = config.keys.map((k: { name: string; weight: number }) => {
         const { matchType, rawScore, fieldScore } = scoreField(
-          (item as Record<string, unknown>)[k.name], normQuery, k.weight, config.caseSensitive, config.fuzzyMaxDistance,
+          (item as Record<string, unknown>)[k.name],
+          normQuery,
+          k.weight,
+          config.caseSensitive,
+          config.fuzzyMaxDistance,
         );
         return { key: k.name, weight: k.weight, matchType, rawScore, fieldScore };
       });
@@ -266,9 +258,7 @@ function workerEntry() {
       }
     }
 
-    results.sort((a: unknown, b: unknown) =>
-      (b as { score: number }).score - (a as { score: number }).score,
-    );
+    results.sort((a: unknown, b: unknown) => (b as { score: number }).score - (a as { score: number }).score);
 
     self.postMessage(results);
   };
