@@ -1,6 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "jsx": "react-jsx",
     "rootDir": ".",
     "types": ["jest", "node"],
     "noEmit": true
