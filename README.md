@@ -29,13 +29,13 @@ Instead of returning a flat list of items that merely contain the query, `ex-sea
 
 Each field is evaluated in order. The first tier that fires wins; lower tiers are not evaluated.
 
-| Tier | Condition | Raw score |
-|------|-----------|-----------|
-| Exact | Field value equals query (case-normalised) | 100 |
-| Starts-with | Field value begins with query | 80 |
-| Contains | Field value includes query as a substring | 65 |
-| Fuzzy | Levenshtein distance ≤ `fuzzyMaxDistance` | 0 – 55 |
-| No match | None of the above | 0 |
+| Tier        | Condition                                  | Raw score |
+| ----------- | ------------------------------------------ | --------- |
+| Exact       | Field value equals query (case-normalised) | 100       |
+| Starts-with | Field value begins with query              | 80        |
+| Contains    | Field value includes query as a substring  | 65        |
+| Fuzzy       | Levenshtein distance ≤ `fuzzyMaxDistance`  | 0 – 55    |
+| No match    | None of the above                          | 0         |
 
 Fuzzy score formula: `(1 − distance / max(fieldLen, queryLen)) × 55`
 
@@ -52,10 +52,10 @@ score       = max(fieldScore across all keys) / 100
 
 **Example** — query `"สยาม"` against a branch record:
 
-| Field | Value | Tier | Raw | Weight | fieldScore |
-|-------|-------|------|-----|--------|------------|
-| name | `สาขาสยามพารากอน` | contains | 65 | 1.0 | 65.0 |
-| address | `991 ถ.พระราม 1 ปทุมวัน` | none | 0 | 0.5 | 0.0 |
+| Field   | Value                    | Tier     | Raw | Weight | fieldScore |
+| ------- | ------------------------ | -------- | --- | ------ | ---------- |
+| name    | `สาขาสยามพารากอน`        | contains | 65  | 1.0    | 65.0       |
+| address | `991 ถ.พระราม 1 ปทุมวัน` | none     | 0   | 0.5    | 0.0        |
 
 → `score = 65.0 / 100 = 0.65`
 
@@ -95,14 +95,14 @@ interface Branch {
 }
 
 const branches: Branch[] = [
-  { id: '001', name: 'สาขาสยามพารากอน',      address: '991 ถ.พระราม 1 ปทุมวัน' },
+  { id: '001', name: 'สาขาสยามพารากอน', address: '991 ถ.พระราม 1 ปทุมวัน' },
   { id: '002', name: 'สาขาเซ็นทรัลลาดพร้าว', address: '1693 ถ.พหลโยธิน จตุจักร' },
-  { id: '003', name: 'สาขาเชียงใหม่',         address: '86 ถ.ช้างคลาน เมือง เชียงใหม่' },
+  { id: '003', name: 'สาขาเชียงใหม่', address: '86 ถ.ช้างคลาน เมือง เชียงใหม่' },
 ];
 
 const results = search(branches, 'สยาม', {
   keys: [
-    { name: 'name',    weight: 1.0 },
+    { name: 'name', weight: 1.0 },
     { name: 'address', weight: 0.5 },
   ],
   threshold: 0.3,
@@ -128,7 +128,7 @@ import { createSearch } from 'ex-search';
 
 const searcher = createSearch<Branch>({
   keys: [
-    { name: 'name',    weight: 1.0 },
+    { name: 'name', weight: 1.0 },
     { name: 'address', weight: 0.5 },
   ],
   threshold: 0.3,
@@ -151,7 +151,7 @@ import { createSearch } from 'ex-search';
 const searcher = createSearch<Branch>({
   keys: [{ name: 'name', weight: 1.0 }],
   threshold: 0.3,
-  useWorker: true,       // scoring runs off the main thread
+  useWorker: true, // scoring runs off the main thread
   sortAlgorithm: 'radix',
 });
 
@@ -166,11 +166,11 @@ const results = await searcher.searchAsync('สยาม');
 ```typescript
 import { Scorer } from 'ex-search';
 
-Scorer.levenshtein('Somchai', 'Somchay');          // 1
-Scorer.exact('สยาม', 'สยาม');                     // 100
-Scorer.startsWith('สยามพารากอน', 'สยาม');         // 80
-Scorer.contains('สาขาสยามพารากอน', 'สยาม');       // 65
-Scorer.fuzzy('Chiangmai', 'Chiengmai');            // ~49  (dist=2, maxLen=9 → (1−2/9)×55)
+Scorer.levenshtein('Somchai', 'Somchay'); // 1
+Scorer.exact('สยาม', 'สยาม'); // 100
+Scorer.startsWith('สยามพารากอน', 'สยาม'); // 80
+Scorer.contains('สาขาสยามพารากอน', 'สยาม'); // 65
+Scorer.fuzzy('Chiangmai', 'Chiengmai'); // ~49  (dist=2, maxLen=9 → (1−2/9)×55)
 ```
 
 ### 5. Piping results into ex-flow
@@ -204,11 +204,7 @@ const plan = flow.resolveExecutionPlan();
 One-shot search over an array. Scores every item, filters by `threshold`, and returns results sorted by score descending.
 
 ```typescript
-function search<T>(
-  data: T[],
-  query: string,
-  config: SearchConfig<T>,
-): SearchResult<T>[]
+function search<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[];
 ```
 
 Returns an empty array when `query` is an empty string or whitespace only.
@@ -220,7 +216,7 @@ Returns an empty array when `query` is an empty string or whitespace only.
 Factory that returns a pre-configured `ExSearch` instance.
 
 ```typescript
-function createSearch<T>(config: SearchConfig<T>): ExSearch<T>
+function createSearch<T>(config: SearchConfig<T>): ExSearch<T>;
 ```
 
 ---
@@ -231,13 +227,13 @@ Reusable searcher. Create once, call `search()` or `searchAsync()` as many times
 
 ```typescript
 class ExSearch<T> {
-  constructor(config: SearchConfig<T>)
+  constructor(config: SearchConfig<T>);
 
-  setData(data: T[]): this
-  updateConfig(config: Partial<SearchConfig<T>>): this
+  setData(data: T[]): this;
+  updateConfig(config: Partial<SearchConfig<T>>): this;
 
-  search(query: string): SearchResult<T>[]
-  searchAsync(query: string): Promise<SearchResult<T>[]>
+  search(query: string): SearchResult<T>[];
+  searchAsync(query: string): Promise<SearchResult<T>[]>;
 }
 ```
 
@@ -257,12 +253,12 @@ Low-level utilities exposed for custom pipelines.
 
 ```typescript
 const Scorer: {
-  exact(a: string, b: string, caseSensitive?: boolean): number
-  startsWith(text: string, query: string, caseSensitive?: boolean): number
-  contains(text: string, query: string, caseSensitive?: boolean): number
-  fuzzy(a: string, b: string, fuzzyMaxDistance?: number, caseSensitive?: boolean): number
-  levenshtein(a: string, b: string): number
-}
+  exact(a: string, b: string, caseSensitive?: boolean): number;
+  startsWith(text: string, query: string, caseSensitive?: boolean): number;
+  contains(text: string, query: string, caseSensitive?: boolean): number;
+  fuzzy(a: string, b: string, fuzzyMaxDistance?: number, caseSensitive?: boolean): number;
+  levenshtein(a: string, b: string): number;
+};
 ```
 
 All string comparisons are **case-insensitive by default**. Pass `true` as the `caseSensitive` argument to opt in to case-sensitive matching.
@@ -275,17 +271,17 @@ All string comparisons are **case-insensitive by default**. Pass `true` as the `
 
 ```typescript
 interface SearchConfig<T> {
-  keys: SearchKey<T>[]
-  threshold?: number        // default: 0.3
-  fuzzyMaxDistance?: number // default: 3
-  caseSensitive?: boolean   // default: false
-  sortAlgorithm?: 'radix' | 'tim'  // default: 'radix'
-  useWorker?: boolean       // default: false
+  keys: SearchKey<T>[];
+  threshold?: number; // default: 0.3
+  fuzzyMaxDistance?: number; // default: 3
+  caseSensitive?: boolean; // default: false
+  sortAlgorithm?: 'radix' | 'tim'; // default: 'radix'
+  useWorker?: boolean; // default: false
 }
 
 interface SearchKey<T> {
-  name: keyof T
-  weight: number  // 0.0 – 1.0
+  name: keyof T;
+  weight: number; // 0.0 – 1.0
 }
 ```
 
@@ -307,17 +303,17 @@ interface SearchKey<T> {
 
 ```typescript
 type SearchResult<T> = Omit<T, 'exFlowPriority'> & {
-  score: number           // 0.0 – 1.0, normalized
-  exFlowPriority: number  // Math.round(score × 100)
-  fieldMatches: FieldMatch[]
-}
+  score: number; // 0.0 – 1.0, normalized
+  exFlowPriority: number; // Math.round(score × 100)
+  fieldMatches: FieldMatch[];
+};
 
 interface FieldMatch {
-  key: string
-  weight: number
-  matchType: 'exact' | 'startsWith' | 'contains' | 'fuzzy' | 'none'
-  rawScore: number    // 0 – 100, before weight
-  fieldScore: number  // rawScore × weight
+  key: string;
+  weight: number;
+  matchType: 'exact' | 'startsWith' | 'contains' | 'fuzzy' | 'none';
+  rawScore: number; // 0 – 100, before weight
+  fieldScore: number; // rawScore × weight
 }
 ```
 
@@ -327,23 +323,23 @@ interface FieldMatch {
 
 Weights reflect how important a field is relative to your domain. There are no prescribed values — tune them based on what your users expect.
 
-| Scenario | Field | Suggested weight |
-|----------|-------|-----------------|
-| Person name (primary identifier) | `name` | `1.0` |
-| Username or code | `code` | `0.8` |
-| Address or description | `address` | `0.5` |
-| Tags or secondary metadata | `tags` | `0.3` |
+| Scenario                         | Field     | Suggested weight |
+| -------------------------------- | --------- | ---------------- |
+| Person name (primary identifier) | `name`    | `1.0`            |
+| Username or code                 | `code`    | `0.8`            |
+| Address or description           | `address` | `0.5`            |
+| Tags or secondary metadata       | `tags`    | `0.3`            |
 
 A weight of `0.0` disables scoring for that field while still including it in `fieldMatches` with a `fieldScore` of `0`.
 
 ## Performance Guide
 
-| Dataset size | Environment | Recommended config |
-|---|---|---|
-| < 10 000 records | Browser / Node | Default (`radix`, sync) |
-| 10 000 – 50 000 | Browser | `sortAlgorithm: 'radix'`, `fuzzyMaxDistance: 2` |
-| > 50 000 | Browser | `useWorker: true`, `sortAlgorithm: 'radix'` |
-| Any size | Node.js | Sync always sufficient; `Worker` not available |
+| Dataset size     | Environment    | Recommended config                              |
+| ---------------- | -------------- | ----------------------------------------------- |
+| < 10 000 records | Browser / Node | Default (`radix`, sync)                         |
+| 10 000 – 50 000  | Browser        | `sortAlgorithm: 'radix'`, `fuzzyMaxDistance: 2` |
+| > 50 000         | Browser        | `useWorker: true`, `sortAlgorithm: 'radix'`     |
+| Any size         | Node.js        | Sync always sufficient; `Worker` not available  |
 
 Reducing `fuzzyMaxDistance` from 3 to 2 cuts the number of fuzzy candidates that reach the scoring step, which is the most CPU-intensive part of the pipeline. If you only need exact and substring matching, set `fuzzyMaxDistance: 0` to skip the Levenshtein computation entirely.
 
@@ -367,22 +363,22 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 
 ## Types Reference
 
-| Type | Description |
-|------|-------------|
-| `SearchConfig<T>` | Configuration passed to `search()`, `createSearch()`, or `ExSearch` constructor |
-| `SearchKey<T>` | A single `{ name: keyof T, weight: number }` entry inside `SearchConfig.keys` |
+| Type              | Description                                                                              |
+| ----------------- | ---------------------------------------------------------------------------------------- |
+| `SearchConfig<T>` | Configuration passed to `search()`, `createSearch()`, or `ExSearch` constructor          |
+| `SearchKey<T>`    | A single `{ name: keyof T, weight: number }` entry inside `SearchConfig.keys`            |
 | `SearchResult<T>` | An item from the input array enriched with `score`, `exFlowPriority`, and `fieldMatches` |
-| `FieldMatch` | Per-field scoring breakdown inside `SearchResult.fieldMatches` |
-| `MatchType` | `'exact' \| 'startsWith' \| 'contains' \| 'fuzzy' \| 'none'` |
-| `SortAlgorithm` | `'radix' \| 'tim'` |
-| `ScorerAPI` | Shape of the exported `Scorer` object |
+| `FieldMatch`      | Per-field scoring breakdown inside `SearchResult.fieldMatches`                           |
+| `MatchType`       | `'exact' \| 'startsWith' \| 'contains' \| 'fuzzy' \| 'none'`                             |
+| `SortAlgorithm`   | `'radix' \| 'tim'`                                                                       |
+| `ScorerAPI`       | Shape of the exported `Scorer` object                                                    |
 
 ## Peer Dependencies
 
-| Package | Version | Role |
-|---------|---------|------|
+| Package    | Version  | Role                                                          |
+| ---------- | -------- | ------------------------------------------------------------- |
 | `exsorted` | `^1.1.0` | Provides `radixSort` and `timSort` for ranking scored results |
-| `ex-flow` | `^1.0.4` | `ExFlowResultItem` shape that `SearchResult<T>` mirrors |
+| `ex-flow`  | `^1.0.4` | `ExFlowResultItem` shape that `SearchResult<T>` mirrors       |
 
 Both packages must be installed in the consuming project. They are not bundled into `ex-search`.
 

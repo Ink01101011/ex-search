@@ -27,10 +27,10 @@ query + field value
 
 ## Sorting
 
-| Algorithm | From      | Complexity | Best for               |
-|-----------|-----------|------------|------------------------|
-| radixSort | exsorted  | O(n)       | Large result sets      |
-| timSort   | exsorted  | O(n log n) | Stable / tie-heavy     |
+| Algorithm | From     | Complexity | Best for           |
+| --------- | -------- | ---------- | ------------------ |
+| radixSort | exsorted | O(n)       | Large result sets  |
+| timSort   | exsorted | O(n log n) | Stable / tie-heavy |
 
 radixSort key: `Math.round((1 − score) × 1_000_000)` (negated for descending).
 
@@ -68,9 +68,9 @@ SearchResult<T> = T & {
 
 ## Performance notes
 
-| Scenario              | Recommended config                              |
-|-----------------------|-------------------------------------------------|
-| < 10 k rows, browser  | default (sync, radix)                           |
-| 10 k–50 k, browser    | sortAlgorithm: 'radix', fuzzyMaxDistance: 2     |
-| > 50 k, browser       | useWorker: true (scores in Worker, sort main)   |
-| Node.js / server      | sync always fine; Worker not available          |
+| Scenario             | Recommended config                            |
+| -------------------- | --------------------------------------------- |
+| < 10 k rows, browser | default (sync, radix)                         |
+| 10 k–50 k, browser   | sortAlgorithm: 'radix', fuzzyMaxDistance: 2   |
+| > 50 k, browser      | useWorker: true (scores in Worker, sort main) |
+| Node.js / server     | sync always fine; Worker not available        |
