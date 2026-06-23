@@ -120,5 +120,10 @@
   "engines": {
     "node": ">=18"
   },
-  "packageManager": "pnpm@10.24.0"
+  "packageManager": "pnpm@10.24.0",
+  "pnpm": {
+    "overrides": {
+      "ws@>=8.0.0 <8.21.0": ">=8.21.0"
+    }
+  }
 }
