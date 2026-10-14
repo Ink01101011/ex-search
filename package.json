@@ -56,7 +56,8 @@
   },
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup --config tsup.config.ts",
