@@ -9,8 +9,9 @@ query + field value
 ┌───────────────────┐
 │  1. Exact match   │  rawScore = 100  (string equality)
 │  2. Starts-with   │  rawScore = 80   (text.startsWith(query))
-│  3. Fuzzy (Myers) │  rawScore = 0–70 (1 − dist/maxLen) × 70
-│  4. No match      │  rawScore = 0
+│  3. Contains      │  rawScore = 65   (text.includes(query))
+│  4. Fuzzy         │  rawScore = 0–55 (1 − dist/maxLen) × 55
+│  5. No match      │  rawScore = 0
 └───────────────────┘
         │
         × weight  (0.0–1.0 per field)
@@ -53,7 +54,7 @@ createSearch<T>(config)   → ExSearch<T>
 Scorer.exact(a, b, cs?)
 Scorer.startsWith(text, query, cs?)
 Scorer.fuzzy(a, b, maxDist?, cs?)
-Scorer.levenshtein(a, b)          ← Myers O(n·⌈m/64⌉) bitwise
+Scorer.levenshtein(a, b)          ← Myers O(n) for m ≤ 32, banded DP beyond
 ```
 
 ## Result shape
@@ -74,3 +75,23 @@ SearchResult<T> = T & {
 | 10 k–50 k, browser   | sortAlgorithm: 'radix', fuzzyMaxDistance: 2   |
 | > 50 k, browser      | useWorker: true (scores in Worker, sort main) |
 | Node.js / server     | sync always fine; Worker not available        |
+
+## Fuzzy tier internals
+
+All scoring lives in `src/core/kernel.ts` (`createKernel()`), a self-contained
+factory whose source text is also embedded in the Web Worker, so the main
+thread and the Worker run identical code.
+
+1. **Length filter** — `|len(value) − len(query)| > fuzzyMaxDistance` ⇒ no
+   match, no distance computed. `fuzzyMaxDistance: 0` therefore skips the
+   fuzzy tier entirely.
+2. **Per-query matcher** — the query's Myers bitmask table (`peq`) is built
+   once per search and reused for every row × key.
+3. **Distance** — Myers bit-parallel when the query is ≤ 32 chars (one 32-bit
+   word); otherwise an Ukkonen-banded DP bounded by `fuzzyMaxDistance`,
+   O(n·k), with early exit once every cell in a row exceeds the bound.
+4. **`fuzzyMode: 'word'`** — the matcher also runs over each whitespace token
+   of the value; the best score wins. `ExSearch` caches tokens per (row, key)
+   and drops the cache on `setData` / `updateConfig`.
+5. **Allocation** — per-key scores go into reusable arrays; `fieldMatches` and
+   the result object are built only for rows at or above `threshold`.

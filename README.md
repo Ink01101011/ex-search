@@ -13,7 +13,8 @@ Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` wi
 
 - **Four-tier match pipeline** — exact (100), starts-with (80), contains (65), and fuzzy (0–55) per field
 - **Field weights** — multiply each tier's score by a per-field importance factor (0.0–1.0)
-- **Myers bit-parallel Levenshtein** — O(n × ⌈m/31⌉) fuzzy distance; effectively O(n) for strings under 31 characters
+- **Myers bit-parallel Levenshtein** — O(n) fuzzy distance when the shorter string is ≤ 32 characters, exact banded DP beyond that; candidates whose length difference already exceeds `fuzzyMaxDistance` are rejected without computing a distance
+- **Word-level fuzzy matching** — opt-in `fuzzyMode: 'word'` lets a one-word typo match inside a multi-word value (`"Somchay"` → `"Somchai Jaidee"`)
 - **Pluggable sort backend** — choose `radixSort` (O(n), best for large result sets) or `timSort` (O(n log n) stable)
 - **Web Worker support** — offload scoring to a Worker thread in browser environments to keep the UI responsive
 - **React hooks** — `useExSearch` (sync, SSR-safe) and `useExSearchAsync` (Worker-backed) via `ex-search/react`
@@ -39,6 +40,8 @@ Each field is evaluated in order. The first tier that fires wins; lower tiers ar
 | No match    | None of the above                          | 0         |
 
 Fuzzy score formula: `(1 − distance / max(fieldLen, queryLen)) × 55`
+
+With `fuzzyMode: 'word'` the fuzzy tier also compares the query against every whitespace-separated word of the value and keeps the best score (then `fieldLen` is that word's length). The exact, starts-with and contains tiers always use the whole value.
 
 A distance of 0 gives 55 (identical strings that weren't caught by exact/contains), while the maximum allowed distance gives a score approaching 0.
 
@@ -143,6 +146,21 @@ const r1 = searcher.search('สยาม');
 const r2 = searcher.search('ลาดพร้าว');
 const r3 = searcher.search('Chiengmai'); // fuzzy → matches 'เชียงใหม่' if within distance
 ```
+
+#### Typos inside multi-word values — `fuzzyMode: 'word'`
+
+By default the fuzzy tier measures the distance to the **whole** value, so a one-letter typo in one word of `"Somchai Jaidee"` is too far away to match. Opt in to word-level fuzzy matching:
+
+```typescript
+const people = createSearch<Person>({
+  keys: [{ name: 'fullName', weight: 1.0 }],
+  fuzzyMode: 'word',
+}).setData(persons);
+
+people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'Somchai')
+```
+
+`ExSearch` tokenises each value once (on the first search after `setData` / `updateConfig`) and reuses the tokens for every keystroke. Call `setData` again if you mutate items in place.
 
 ### 3. Async search with Web Worker (large datasets, browser only)
 
@@ -363,7 +381,7 @@ const Scorer: {
 
 All string comparisons are **case-insensitive by default**. Pass `true` as the `caseSensitive` argument to opt in to case-sensitive matching.
 
-`levenshtein` returns the raw edit distance (integer). The `fuzzy` method converts this to a score in the range 0–55 and returns 0 when the distance exceeds `fuzzyMaxDistance`.
+`levenshtein` returns the exact edit distance (integer) for strings of any length. The `fuzzy` method converts this to a score in the range 0–55 and returns 0 when the distance exceeds `fuzzyMaxDistance`.
 
 ---
 
@@ -377,6 +395,7 @@ interface SearchConfig<T> {
   caseSensitive?: boolean; // default: false
   sortAlgorithm?: 'radix' | 'tim'; // default: 'radix'
   useWorker?: boolean; // default: false
+  fuzzyMode?: 'value' | 'word'; // default: 'value'
 }
 
 interface SearchKey<T> {
@@ -389,7 +408,9 @@ interface SearchKey<T> {
 
 **`threshold`** — Minimum normalized score (0.0–1.0) to include a result. A value of `0.3` means only results with `score ≥ 0.30` are returned.
 
-**`fuzzyMaxDistance`** — Maximum Levenshtein edit distance treated as a match. Distance 1 catches single-character typos; distance 3 allows three substitutions, insertions, or deletions. Larger values widen fuzzy recall but slow scoring when data is large.
+**`fuzzyMaxDistance`** — Maximum Levenshtein edit distance treated as a match. Distance 1 catches single-character typos; distance 3 allows three substitutions, insertions, or deletions. Larger values widen fuzzy recall but slow scoring when data is large. `0` disables the fuzzy tier.
+
+**`fuzzyMode`** — `'value'` (default) compares the query with the whole field value. `'word'` additionally compares it with each whitespace-separated word of the value and keeps the best match, so a typo in one word of a multi-word value still matches.
 
 **`caseSensitive`** — Applies to all four match tiers simultaneously.
 
@@ -443,7 +464,7 @@ A weight of `0.0` disables scoring for that field while still including it in `f
 
 Reducing `fuzzyMaxDistance` from 3 to 2 cuts the number of fuzzy candidates that reach the scoring step, which is the most CPU-intensive part of the pipeline. If you only need exact and substring matching, set `fuzzyMaxDistance: 0` to skip the Levenshtein computation entirely.
 
-The Myers bit-parallel Levenshtein runs at O(n × ⌈m/31⌉) using JavaScript's 32-bit bitwise operations, where m is the shorter string length and n is the longer. For strings under 31 characters — the typical case for search queries — the inner bit-vector loop runs exactly once per character in n, giving effective O(n) behaviour.
+The fuzzy tier first compares lengths: an edit distance is never smaller than the length difference, so any value whose length differs from the query by more than `fuzzyMaxDistance` is rejected with no distance computed. For the remaining candidates, queries of up to 32 characters use Myers' bit-parallel algorithm over JavaScript's 32-bit bitwise operations — O(n) in the value length, with the query's bitmask table built once per search rather than once per row. Longer queries use an Ukkonen-banded DP that costs O(n × `fuzzyMaxDistance`) and stops as soon as the bound is exceeded. Rows that fall below `threshold` allocate no result objects.
 
 ## Import Paths
 
