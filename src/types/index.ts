@@ -34,6 +34,8 @@ export interface SearchKey<T> {
 
 export type SortAlgorithm = 'radix' | 'tim';
 
+export type FuzzyMode = 'value' | 'word';
+
 export interface SearchConfig<T> {
   /** Fields to search and their weights */
   keys: SearchKey<T>[];
@@ -48,9 +50,22 @@ export interface SearchConfig<T> {
   /**
    * Maximum Levenshtein distance considered a valid fuzzy match.
    * Larger values allow more typos but slow down matching.
+   * `0` disables the fuzzy tier (no distance is ever computed).
    * @default 3
    */
   fuzzyMaxDistance?: number;
+
+  /**
+   * What the fuzzy tier compares the query against.
+   * 'value' — the whole field value (one typo in "Somchay" never matches
+   *           "Somchai Jaidee": the distance covers the whole value).
+   * 'word'  — the whole value **and** each whitespace-separated word of it;
+   *           the best one wins, so "Somchay" matches "Somchai Jaidee".
+   *           Exact / startsWith / contains still use the whole value.
+   *           `ExSearch` tokenises each value once per `setData` / `updateConfig`.
+   * @default 'value'
+   */
+  fuzzyMode?: FuzzyMode;
 
   /**
    * When true, string comparisons are case-sensitive.
@@ -121,13 +136,15 @@ export interface ScorerAPI {
   /**
    * Returns a fuzzy score 0 – 55 derived from Levenshtein distance:
    *   score = (1 - distance / max(a.length, b.length)) × 55
-   * Returns 0 if distance > fuzzyMaxDistance.
+   * Returns 0 if distance > fuzzyMaxDistance (decided from the length
+   * difference alone when possible, without computing a distance).
    */
   fuzzy(a: string, b: string, fuzzyMaxDistance?: number, caseSensitive?: boolean): number;
 
   /**
-   * Raw Levenshtein distance computed via the bitwise Myers algorithm.
-   * O(n × ⌈m/w⌉) time, O(m) space (w = machine word size, typically 64).
+   * Exact Levenshtein distance for strings of any length.
+   * Myers bit-parallel O(n) when the shorter string is ≤ 32 characters,
+   * a banded dynamic-programming fallback otherwise.
    */
   levenshtein(a: string, b: string): number;
 }
