@@ -24,6 +24,15 @@ export { search, createSearch, ExSearch } from './core/search';
 
 export { Scorer } from './core/scorer';
 
-export type { SearchConfig, SearchKey, SearchResult, FieldMatch, MatchType, SortAlgorithm, ScorerAPI } from './types';
+export type {
+  SearchConfig,
+  SearchKey,
+  SearchResult,
+  FieldMatch,
+  MatchType,
+  SortAlgorithm,
+  FuzzyMode,
+  ScorerAPI,
+} from './types';
 
 export type { ExFlowResultItem } from 'ex-flow';
