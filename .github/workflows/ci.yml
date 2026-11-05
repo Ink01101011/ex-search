@@ -76,7 +76,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # oxlint 1.6x declares engines ^20.19 || >=22.12, so pnpm skips its native
+      # binding on Node 18. Lint is dev tooling, not the library: run it elsewhere.
       - name: Lint
+        if: matrix.node != 18
         run: pnpm run lint
 
       - name: Typecheck
@@ -178,8 +181,14 @@ jobs:
             console.log(`${ext}: index -> ${[...main].map((f) => path.relative(dist, f))}; react -> ${[...react].map((f) => path.relative(dist, f))}; shared -> ${shared.map((f) => path.relative(dist, f))}`);
             if (shared.length === 0 || !shared.every((f) => fs.existsSync(f))) { fail++; console.error(`FAIL ${ext}: entries do not share a chunk`); }
           }
+          // The shared chunk is the only module both entries import: its exports
+          // must be the very ExSearch class the root entry exposes.
           const main = require('ex-search'); require('ex-search/react');
-          if (!(new main.ExSearch({ keys: [] }) instanceof main.ExSearch)) fail++;
+          const sharedFile = [...relDeps(path.join(dist, 'index.cjs'), /require\(["'](\.{1,2}\/[^"']+)["']\)/g)]
+            .find((f) => relDeps(path.join(dist, 'react/index.cjs'), /require\(["'](\.{1,2}\/[^"']+)["']\)/g).has(f));
+          const chunk = require(sharedFile);
+          if (chunk.ExSearch !== main.ExSearch) { fail++; console.error('FAIL react entry core is a different ExSearch class'); }
+          if (!(new chunk.ExSearch({ keys: [] }) instanceof main.ExSearch)) { fail++; console.error('FAIL instanceof across entries'); }
           process.exit(fail ? 1 : 0);
           EOF
           node shared-core.cjs
@@ -201,6 +210,9 @@ jobs:
           TSC="$GITHUB_WORKSPACE/node_modules/typescript/bin/tsc"
           node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.mts
           node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module preserve --moduleResolution bundler types-smoke.mts
+          # .cts resolves the CJS typings (.d.ts); .mts above resolves .d.mts.
+          cp types-smoke.mts types-smoke.cts
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.cts
 
       # exsorted is a required peer; ex-flow and react stay optional, so the
       # root, ./precision and ./types entries must load with only exsorted.
@@ -244,3 +256,6 @@ jobs:
           TSC="$GITHUB_WORKSPACE/node_modules/typescript/bin/tsc"
           node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.mts
           node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module preserve --moduleResolution bundler types-smoke.mts
+          # .cts resolves the CJS typings (.d.ts); .mts above resolves .d.mts.
+          cp types-smoke.mts types-smoke.cts
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.cts

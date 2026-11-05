@@ -265,7 +265,7 @@ function BranchList({ branches }: { branches: Branch[] }) {
 
 A search that is superseded by a newer query, or whose component unmounts, is **aborted**: its Worker is terminated and nothing is reported. If the async path fails (for example a Worker runtime error) the hook retries with the synchronous search; only when that fails too does it return `results: []` together with a non-null `error`.
 
-**Config stability note** — both hooks list `config` as a `useMemo`/`useEffect` dependency. If you create the config object inline (e.g. `useExSearch(data, query, { keys: [...] })`), a new object is produced on every render, causing the hook to re-run even when nothing changed. Wrapping the config in `useMemo` prevents this.
+**Config stability note** — both hooks compare `config` by **content** (each key's name and weight, plus `threshold`, `fuzzyMaxDistance`, `caseSensitive`, `sortAlgorithm`, `useWorker` and `fuzzyMode`), not by object identity. An inline config such as `useExSearch(data, query, { keys: [...] })` is therefore safe: it does not rebuild the searcher or restart the effect, and the word-mode token cache survives re-renders. Wrapping the config in `useMemo` is optional.
 
 ### 6. Piping results into ex-flow
 
@@ -567,7 +567,7 @@ Behaviour changes in 2.0.0:
 
 - **Query is trimmed.** Leading and trailing whitespace is removed before matching; a blank query returns `[]`.
 - **Only primitive values are searchable.** Values of type `string`, `number`, `bigint` and `boolean` are matched. Objects, arrays and `String` objects no longer match, and `null`/`undefined` rows are skipped.
-- **Invalid configuration throws.** Bad `keys`, weights or `threshold` now raise `TypeError`/`RangeError` from `search()`, the `ExSearch` constructor, `updateConfig`, and `useExSearch` during render. (`useExSearchAsync` reports them through its `error` field instead.)
+- **Invalid configuration throws.** Bad `keys` or weights, or a non-finite `threshold` (`NaN`/`Infinity`), now raise `TypeError`/`RangeError` from `search()`, the `ExSearch` constructor, `updateConfig`, and `useExSearch` during render. (`useExSearchAsync` reports them through its `error` field instead.)
 - **`updateConfig` ignores explicit `undefined`.** A field set to `undefined` keeps its current value; build a new `ExSearch` to reset fields to defaults.
 - **`exsorted` is a required peer dependency.** Install it alongside `ex-search`. `react` and `ex-flow` stay optional.
 - **ex-flow usage.** Results cannot be handed to `addEntity` as `data` unchanged; lift `exFlowPriority` into `priority` (see [Piping results into ex-flow](#6-piping-results-into-ex-flow)).

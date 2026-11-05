@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { ExSearch } from '../../core/search';
 import type { SearchConfig, SearchResult } from '../../types';
+import { useStableConfig } from './useStableConfig';
 
 /**
  * Async search hook that optionally delegates scoring to a Web Worker.
@@ -17,13 +18,14 @@ import type { SearchConfig, SearchResult } from '../../types';
  * invalid config here is caught inside the effect and reported through `error`
  * with `results: []`.
  *
- * **Config stability** — wrap `config` in `useMemo` to prevent the effect from
- * restarting on every render when the config object is defined inline.
+ * **Config stability** — `config` is compared by content (keys, weights and
+ * every scalar field), so an inline config object is safe: it does not restart
+ * the effect. Wrapping it in `useMemo` is optional.
  *
  * @param data - Array of items to search.
  * @param query - Search string. An empty or whitespace-only query returns `[]`
  *   immediately without triggering a loading state.
- * @param config - Search configuration (keys, threshold, fuzzyMaxDistance, …).
+ * @param inlineConfig - Search configuration (keys, threshold, fuzzyMaxDistance, …).
  * @returns `{ results, loading, error }` — `loading` is `true` only while an
  *   async Worker search is in flight. When the async path fails the hook falls
  *   back to the synchronous search; `error` is set (and `results` emptied) only
@@ -42,8 +44,9 @@ import type { SearchConfig, SearchResult } from '../../types';
 export function useExSearchAsync<T>(
   data: T[],
   query: string,
-  config: SearchConfig<T>,
+  inlineConfig: SearchConfig<T>,
 ): { results: SearchResult<T>[]; loading: boolean; error: Error | null } {
+  const config = useStableConfig(inlineConfig);
   const [results, setResults] = useState<SearchResult<T>[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -55,7 +58,7 @@ export function useExSearchAsync<T>(
 
   useEffect(() => {
     if (!query.trim()) {
-      setResults([]);
+      setResults(emptyResults);
       setLoading(false);
       setError(null);
       return;
@@ -83,8 +86,8 @@ export function useExSearchAsync<T>(
       searcherRef.current = null;
       appliedConfig.current = null;
       appliedData.current = null;
-      setResults([]);
-      setError(toError(err));
+      setResults(emptyResults);
+      setError((prev) => sameError(prev, err));
       setLoading(false);
       return;
     }
@@ -108,8 +111,8 @@ export function useExSearchAsync<T>(
           setResults(r);
           setError(null);
         } catch (syncErr) {
-          setResults([]);
-          setError(toError(syncErr));
+          setResults(emptyResults);
+          setError((prev) => sameError(prev, syncErr));
         }
         setLoading(false);
       });
@@ -121,6 +124,17 @@ export function useExSearchAsync<T>(
   }, [data, query, config]);
 
   return { results, loading, error };
+}
+
+// Bail-out updaters: returning the previous state skips the re-render, so a
+// repeated no-op (empty results, same error message) cannot loop.
+function emptyResults<R>(prev: R[]): R[] {
+  return prev.length === 0 ? prev : [];
+}
+
+function sameError(prev: Error | null, err: unknown): Error {
+  const next = toError(err);
+  return prev !== null && prev.message === next.message ? prev : next;
 }
 
 function isAbortError(err: unknown): boolean {

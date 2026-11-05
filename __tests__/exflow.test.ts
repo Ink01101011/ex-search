@@ -36,10 +36,12 @@ describe('piping results into ex-flow (README section 6)', () => {
     const plan = flow.resolveExecutionPlan();
     // --- end README example ---
 
-    expect(plan.fullSequence.map((n) => n.id)).toEqual(results.map((r) => r.id));
+    // Tie order between equal priorities is ex-flow's business, so assert the
+    // id set and the non-increasing priority order, not an exact id sequence.
+    expect(plan.fullSequence.map((n) => n.id).sort()).toEqual(results.map((r) => r.id).sort());
     const priorities = plan.fullSequence.map((n) => n.exFlowPriority);
-    expect(priorities).toEqual(results.map((r) => r.exFlowPriority));
-    expect(priorities).toEqual([...priorities].sort((x, y) => y - x));
+    expect([...priorities].sort((x, y) => y - x)).toEqual(priorities);
+    expect([...priorities].sort((x, y) => y - x)).toEqual(results.map((r) => r.exFlowPriority));
   });
 
   it('passing a result as-is is rejected by ex-flow (reserved field), hence the lift', () => {
