@@ -16,6 +16,22 @@ export interface KernelConfig {
   fuzzyMode: 'value' | 'word';
 }
 
+/** A surviving row: its index, best weighted field score and per-field breakdown. */
+export interface KernelHit {
+  row: number;
+  /** Best weighted field score (0 – 100 × weight). */
+  best: number;
+  /** `best / 100`. */
+  score: number;
+  fieldMatches: Array<{
+    key: string;
+    weight: number;
+    matchType: MatchType;
+    rawScore: number;
+    fieldScore: number;
+  }>;
+}
+
 /**
  * Scoring kernel shared by the main thread and the Web Worker.
  *
@@ -31,6 +47,7 @@ export function createKernel() {
 
   // Reusable DP rows for the banded fallback. The kernel is synchronous, so a
   // single pair per kernel instance is safe.
+  const SCRATCH_LIMIT = 65536;
   let rowA = new Int32Array(64);
   let rowB = new Int32Array(64);
 
@@ -81,6 +98,17 @@ export function createKernel() {
    * soon as every cell in a row exceeds `max`. Works for any string length.
    */
   function banded(a: string, b: string, max: number): number {
+    const d = bandedRun(a, b, max);
+    // Do not pin a huge scratch buffer for the lifetime of the kernel after one
+    // very long comparison.
+    if (rowA.length > SCRATCH_LIMIT) {
+      rowA = new Int32Array(64);
+      rowB = new Int32Array(64);
+    }
+    return d;
+  }
+
+  function bandedRun(a: string, b: string, max: number): number {
     if (a.length > b.length) {
       const t = a;
       a = b;
@@ -204,19 +232,36 @@ export function createKernel() {
   const MATCH_NONE: MatchType = 'none';
 
   /**
-   * Runs the four-tier pipeline over `data` and returns the unsorted survivors.
+   * Turns a field value into searchable text. Strings pass through; numbers,
+   * bigints and booleans are stringified; everything else (null, undefined,
+   * objects, arrays, functions, symbols) has no text and never matches.
+   */
+  function toText(value: unknown): string | null {
+    const t = typeof value;
+    if (t === 'string') return value as string;
+    if (t === 'number' || t === 'bigint' || t === 'boolean') return String(value);
+    return null;
+  }
+
+  /**
+   * Runs the four-tier pipeline over `nRows` rows and returns the unsorted
+   * survivors as lightweight hits (row index, score, per-field breakdown).
+   * `getText(row, key)` supplies the raw text of a field: `null` means "no
+   * text" (scores 0) and `undefined` at key 0 means "skip this row entirely".
    * Rows that fall below the threshold allocate nothing.
    */
-  function scoreRows<T>(
-    data: T[],
+  function scoreRows(
+    getText: (row: number, key: number) => string | null | undefined,
+    nRows: number,
     normQuery: string,
     config: KernelConfig,
     tokensFor: TokenSource | null,
-  ): Array<Record<string, unknown>> {
+  ): KernelHit[] {
     const keys = config.keys;
     const nKeys = keys.length;
     const cs = config.caseSensitive;
     const max = config.fuzzyMaxDistance;
+    const fuzzyOn = max > 0;
     const threshold = config.threshold;
     const wordMode = config.fuzzyMode === 'word';
     const qLen = normQuery.length;
@@ -224,46 +269,47 @@ export function createKernel() {
 
     const types: MatchType[] = [];
     const raws = new Float64Array(nKeys);
-    const results: Array<Record<string, unknown>> = [];
+    const hits: KernelHit[] = [];
 
-    for (let r = 0; r < data.length; r++) {
-      const item = data[r] as Record<string | number | symbol, unknown>;
+    for (let r = 0; r < nRows; r++) {
       let best = -Infinity;
 
       for (let k = 0; k < nKeys; k++) {
-        const value = item[keys[k].name];
-        const raw = String(value ?? '');
-        const text = cs ? raw : raw.toLowerCase();
+        const raw = getText(r, k);
+        if (raw === undefined && k === 0) break;
         let type = MATCH_NONE;
         let score = 0;
 
-        if (text === normQuery) {
-          type = MATCH_EXACT;
-          score = 100;
-        } else if (text.startsWith(normQuery)) {
-          type = MATCH_STARTS;
-          score = 80;
-        } else if (text.includes(normQuery)) {
-          type = MATCH_CONTAINS;
-          score = 65;
-        } else {
-          const d = match(text);
-          if (d <= max) {
-            type = MATCH_FUZZY;
-            score = (1 - d / (text.length > qLen ? text.length : qLen)) * 55;
-          }
-          if (wordMode && tokensFor !== null) {
-            const tokens = tokensFor(r, k, text);
-            // A single token equal to the whole value was already scored above.
-            const start = tokens.length === 1 && tokens[0] === text ? 1 : 0;
-            for (let t = start; t < tokens.length; t++) {
-              const tok = tokens[t];
-              const td = match(tok);
-              if (td <= max) {
-                const s = (1 - td / (tok.length > qLen ? tok.length : qLen)) * 55;
-                if (s > score) {
-                  type = MATCH_FUZZY;
-                  score = s;
+        if (typeof raw === 'string') {
+          const text = cs ? raw : raw.toLowerCase();
+          if (text === normQuery) {
+            type = MATCH_EXACT;
+            score = 100;
+          } else if (text.startsWith(normQuery)) {
+            type = MATCH_STARTS;
+            score = 80;
+          } else if (text.includes(normQuery)) {
+            type = MATCH_CONTAINS;
+            score = 65;
+          } else if (fuzzyOn) {
+            const d = match(text);
+            if (d <= max) {
+              type = MATCH_FUZZY;
+              score = (1 - d / (text.length > qLen ? text.length : qLen)) * 55;
+            }
+            if (wordMode && tokensFor !== null) {
+              const tokens = tokensFor(r, k, text);
+              // A single token equal to the whole value was already scored above.
+              const start = tokens.length === 1 && tokens[0] === text ? 1 : 0;
+              for (let t = start; t < tokens.length; t++) {
+                const tok = tokens[t];
+                const td = match(tok);
+                if (td <= max) {
+                  const s = (1 - td / (tok.length > qLen ? tok.length : qLen)) * 55;
+                  if (s > score) {
+                    type = MATCH_FUZZY;
+                    score = s;
+                  }
                 }
               }
             }
@@ -276,10 +322,11 @@ export function createKernel() {
         if (fieldScore > best) best = fieldScore;
       }
 
+      if (best === -Infinity) continue; // skipped row (or no keys)
       const total = best / 100;
       if (total < threshold) continue;
 
-      const fieldMatches: Array<Record<string, unknown>> = [];
+      const fieldMatches: KernelHit['fieldMatches'] = [];
       for (let k = 0; k < nKeys; k++) {
         fieldMatches.push({
           key: String(keys[k].name),
@@ -289,18 +336,13 @@ export function createKernel() {
           fieldScore: raws[k] * keys[k].weight,
         });
       }
-
-      const out: Record<string, unknown> = Object.assign({}, item);
-      out.exFlowPriority = Math.round(best);
-      out.score = total;
-      out.fieldMatches = fieldMatches;
-      results.push(out);
+      hits.push({ row: r, best, score: total, fieldMatches });
     }
 
-    return results;
+    return hits;
   }
 
-  return { levenshtein, boundedDistance, createMatcher, tokenize, scoreRows };
+  return { levenshtein, boundedDistance, createMatcher, tokenize, toText, scoreRows };
 }
 
 export type Kernel = ReturnType<typeof createKernel>;

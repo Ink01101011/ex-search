@@ -20,8 +20,11 @@ import type { SearchConfig, SearchResult } from '../../types';
  * @param query - Search string. An empty or whitespace-only query returns `[]`
  *   immediately without triggering a loading state.
  * @param config - Search configuration (keys, threshold, fuzzyMaxDistance, …).
- * @returns `{ results, loading }` — `loading` is `true` only while an async
- *   Worker search is in flight.
+ * @returns `{ results, loading, error }` — `loading` is `true` only while an
+ *   async Worker search is in flight. When the async path fails the hook falls
+ *   back to the synchronous search; `error` is set (and `results` emptied) only
+ *   if that fails too. A superseded or unmounted search is aborted (the Worker
+ *   is terminated) and never surfaces as an error.
  *
  * @example
  * const config = useMemo(() => ({
@@ -30,48 +33,87 @@ import type { SearchConfig, SearchResult } from '../../types';
  *   useWorker: true,
  * }), []);
  *
- * const { results, loading } = useExSearchAsync(branches, query, config);
+ * const { results, loading, error } = useExSearchAsync(branches, query, config);
  */
 export function useExSearchAsync<T>(
   data: T[],
   query: string,
   config: SearchConfig<T>,
-): { results: SearchResult<T>[]; loading: boolean } {
+): { results: SearchResult<T>[]; loading: boolean; error: Error | null } {
   const [results, setResults] = useState<SearchResult<T>[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
   const searcherRef = useRef<ExSearch<T> | null>(null);
+  // Identities last pushed into the searcher: re-pushing an unchanged config
+  // or dataset would drop the word-mode token cache on every keystroke.
+  const appliedData = useRef<T[] | null>(null);
+  const appliedConfig = useRef<SearchConfig<T> | null>(null);
 
   useEffect(() => {
     if (!query.trim()) {
       setResults([]);
       setLoading(false);
+      setError(null);
       return;
     }
 
+    const controller = new AbortController();
     let cancelled = false;
 
     if (searcherRef.current === null) {
       searcherRef.current = new ExSearch(config);
+      appliedConfig.current = config;
     }
-    searcherRef.current.updateConfig(config).setData(data);
+    const searcher = searcherRef.current;
+    if (appliedConfig.current !== config) {
+      searcher.updateConfig(config);
+      appliedConfig.current = config;
+    }
+    if (appliedData.current !== data) {
+      searcher.setData(data);
+      appliedData.current = data;
+    }
     setLoading(true);
 
-    searcherRef.current
-      .searchAsync(query)
+    searcher
+      .searchAsync(query, { signal: controller.signal })
       .then((r) => {
         if (!cancelled) {
           setResults(r);
+          setError(null);
           setLoading(false);
         }
       })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
+      .catch((err: unknown) => {
+        if (cancelled || isAbortError(err)) return;
+        // The async path failed (Worker runtime error, ...): answer from the
+        // synchronous path when possible, otherwise show no results.
+        try {
+          const r = searcher.search(query);
+          setResults(r);
+          setError(null);
+        } catch (syncErr) {
+          setResults([]);
+          setError(toError(syncErr));
+        }
+        setLoading(false);
       });
 
     return () => {
       cancelled = true;
+      controller.abort(); // terminates a superseded or unmounted Worker search
     };
   }, [data, query, config]);
 
-  return { results, loading };
+  return { results, loading, error };
+}
+
+function isAbortError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
+}
+
+function toError(err: unknown): Error {
+  if (err instanceof Error) return err;
+  const message = typeof err === 'object' && err !== null ? (err as { message?: unknown }).message : undefined;
+  return new Error(typeof message === 'string' ? message : String(err));
 }

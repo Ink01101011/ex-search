@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { search } from '../../core/search';
+import { ExSearch } from '../../core/search';
 import type { SearchConfig, SearchResult } from '../../types';
 
 /**
@@ -26,5 +26,8 @@ import type { SearchConfig, SearchResult } from '../../types';
  * const results = useExSearch(branches, query, config);
  */
 export function useExSearch<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[] {
-  return useMemo(() => search(data, query, config), [data, query, config]);
+  // One searcher per (data, config): in fuzzyMode 'word' its token cache then
+  // survives query changes instead of re-tokenising every row per keystroke.
+  const searcher = useMemo(() => new ExSearch(config).setData(data), [data, config]);
+  return useMemo(() => searcher.search(query), [searcher, query]);
 }

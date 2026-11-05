@@ -79,10 +79,10 @@ pnpm add ex-search
 npm install ex-search
 ```
 
-`ex-search` requires `exsorted` and `ex-flow` as peer dependencies:
+`ex-search` requires `exsorted` as a peer dependency (the root and `ex-search/react` entries import it when they load). `react` and `ex-flow` are optional peers: install `react` only for `ex-search/react`, and `ex-flow` only if you pipe results into it.
 
 ```bash
-pnpm add exsorted ex-flow
+pnpm add exsorted
 ```
 
 ## Quick Start
@@ -144,7 +144,7 @@ searcher.setData(branches);
 // Call search as many times as needed without re-configuring
 const r1 = searcher.search('สยาม');
 const r2 = searcher.search('ลาดพร้าว');
-const r3 = searcher.search('Chiengmai'); // fuzzy → matches 'เชียงใหม่' if within distance
+const r3 = searcher.search('ลาดพร้าา'); // fuzzy → still matches 'ลาดพร้าว' (distance 1 ≤ fuzzyMaxDistance)
 ```
 
 #### Typos inside multi-word values — `fuzzyMode: 'word'`
@@ -189,7 +189,7 @@ Scorer.levenshtein('Somchai', 'Somchay'); // 1
 Scorer.exact('สยาม', 'สยาม'); // 100
 Scorer.startsWith('สยามพารากอน', 'สยาม'); // 80
 Scorer.contains('สาขาสยามพารากอน', 'สยาม'); // 65
-Scorer.fuzzy('Chiangmai', 'Chiengmai'); // ~49  (dist=2, maxLen=9 → (1−2/9)×55)
+Scorer.fuzzy('Chiangmai', 'Chiengmai'); // ~48.9  (dist=1, maxLen=9 → (1−1/9)×55)
 ```
 
 ### 5. React hooks
@@ -199,7 +199,7 @@ Install `react` as a peer dependency (already required if you are in a React pro
 #### `useExSearch` — synchronous, SSR-safe
 
 ```typescript
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useExSearch } from 'ex-search/react';
 
 function BranchList({ branches }: { branches: Branch[] }) {
@@ -233,6 +233,7 @@ function BranchList({ branches }: { branches: Branch[] }) {
 #### `useExSearchAsync` — Worker-backed, large datasets
 
 ```typescript
+import { useMemo, useState } from 'react';
 import { useExSearchAsync } from 'ex-search/react';
 
 function BranchList({ branches }: { branches: Branch[] }) {
@@ -247,12 +248,13 @@ function BranchList({ branches }: { branches: Branch[] }) {
     [],
   );
 
-  const { results, loading } = useExSearchAsync(branches, query, config);
+  const { results, loading, error } = useExSearchAsync(branches, query, config);
 
   return (
     <>
       <input value={query} onChange={(e) => setQuery(e.target.value)} />
       {loading && <span>Searching…</span>}
+      {error && <span role="alert">Search failed: {error.message}</span>}
       {results.map((r) => <div key={r.id}>{r.name}</div>)}
     </>
   );
@@ -260,6 +262,8 @@ function BranchList({ branches }: { branches: Branch[] }) {
 ```
 
 `useExSearchAsync` uses `useEffect`, so it is **skipped during SSR** — the initial render returns `{ results: [], loading: false }`. An empty or whitespace-only query resets results immediately without triggering the `loading` state. When `Worker` is unavailable (Node.js, SSR, or when `useWorker` is `false`) the hook falls back to synchronous execution transparently.
+
+A search that is superseded by a newer query, or whose component unmounts, is **aborted**: its Worker is terminated and nothing is reported. If the async path fails (for example a Worker runtime error) the hook retries with the synchronous search; only when that fails too does it return `results: []` together with a non-null `error`.
 
 **Config stability note** — both hooks list `config` as a `useMemo`/`useEffect` dependency. If you create the config object inline (e.g. `useExSearch(data, query, { keys: [...] })`), a new object is produced on every render, causing the hook to re-run even when nothing changed. Wrapping the config in `useMemo` prevents this.
 
@@ -315,7 +319,7 @@ interpolationSearch(rows, 300, (r) => r.ts); // 2
 | `fibonacciSearch`     | Comparison-only, no division     | O(log n)                             | comparator  |
 | `interpolationSearch` | Uniformly distributed numbers    | O(log log n) uniform, O(log n) worst | numeric key |
 
-`interpolationSearch` falls back to plain bisection when interpolation does not converge, so skewed data cannot make it linear. Its `key` argument is optional only for `number[]`; for any other element type TypeScript requires it.
+`exponentialSearch` makes about twice as many comparisons as plain binary search on randomly placed targets; it only wins when the target tends to sit near the front. `interpolationSearch` falls back to plain bisection when interpolation does not converge, so skewed data cannot make it linear. Its `key` argument is optional only for `number[]`; for any other element type TypeScript requires it.
 
 With the default comparator the array must not contain holes, `undefined` or `NaN`: the default comparator returns `0` for incomparable values, so they would be treated as matches. A `NaN` target returns `-1` under the default comparator; if you pass your own comparator (for example one that sorts `NaN` last) it is used as-is.
 
@@ -373,7 +377,15 @@ class ExSearch<T> {
 
 **`search(query)`** — Synchronous. Suitable for datasets up to ~50 000 records in browser environments or any size in Node.js.
 
-**`searchAsync(query)`** — When `useWorker: true` and the environment supports `Worker`, scoring runs in a dedicated Worker thread. Falls back to synchronous execution otherwise.
+**`searchAsync(query, options?)`** — When `useWorker: true` and the environment supports `Worker`, scoring runs in a dedicated Worker thread. Falls back to synchronous execution otherwise (Node.js, SSR, or when the Worker cannot be started or fed). Only the extracted key texts are posted to the Worker, never the rows, so rows holding functions, symbols or getters give exactly the results `search()` gives; ranking and result objects are built on the calling thread. Pass `{ signal }` (an `AbortSignal`) to cancel: the Worker is terminated and the promise rejects with an `AbortError`.
+
+```typescript
+const controller = new AbortController();
+const pending = searcher.searchAsync('สยาม', { signal: controller.signal });
+controller.abort(); // pending rejects with an AbortError (name === 'AbortError')
+```
+
+**Deployment notes** — the Worker is created from a `blob:` URL. A Content-Security-Policy must allow it with `worker-src blob:` (or `child-src blob:`), and pages that enforce Trusted Types block blob Workers. In both cases `searchAsync` silently falls back to the synchronous path. Deno needs module Workers, which this release does not enable (unverified).
 
 ---
 
@@ -398,10 +410,10 @@ function useExSearchAsync<T>(
   data: T[],
   query: string,
   config: SearchConfig<T>,
-): { results: SearchResult<T>[]; loading: boolean };
+): { results: SearchResult<T>[]; loading: boolean; error: Error | null };
 ```
 
-SSR-safe — `useEffect` is skipped on the server; initial state is `{ results: [], loading: false }`. Blank queries skip the loading state entirely.
+SSR-safe — `useEffect` is skipped on the server; initial state is `{ results: [], loading: false }`. Blank queries skip the loading state entirely. `error` is `null` unless both the Worker path and the synchronous fallback failed.
 
 ---
 
@@ -421,7 +433,7 @@ const Scorer: {
 
 All string comparisons are **case-insensitive by default**. Pass `true` as the `caseSensitive` argument to opt in to case-sensitive matching.
 
-`levenshtein` returns the exact edit distance (integer) for strings of any length. The `fuzzy` method converts this to a score in the range 0–55 and returns 0 when the distance exceeds `fuzzyMaxDistance`.
+`levenshtein` returns the exact edit distance (integer) for strings of any length. The `fuzzy` method converts this to a score in the range 0–55 and returns 0 when the distance exceeds `fuzzyMaxDistance`. Above 32 characters `levenshtein` is a full O(n·m) dynamic programme, so keep it for short strings (the search pipeline itself uses the bounded, banded variant).
 
 ---
 
@@ -448,7 +460,7 @@ interface SearchKey<T> {
 
 **`threshold`** — Minimum normalized score (0.0–1.0) to include a result. A value of `0.3` means only results with `score ≥ 0.30` are returned.
 
-**`fuzzyMaxDistance`** — Maximum Levenshtein edit distance treated as a match. Distance 1 catches single-character typos; distance 3 allows three substitutions, insertions, or deletions. Larger values widen fuzzy recall but slow scoring when data is large. `0` disables the fuzzy tier.
+**`fuzzyMaxDistance`** — Maximum Levenshtein edit distance treated as a match. Distance 1 catches single-character typos; distance 3 allows three substitutions, insertions, or deletions. Larger values widen fuzzy recall but slow scoring when data is large. `0` disables the fuzzy tier: no distance is ever computed.
 
 **`fuzzyMode`** — `'value'` (default) compares the query with the whole field value. `'word'` additionally compares it with each whitespace-separated word of the value and keeps the best match, so a typo in one word of a multi-word value still matches.
 
@@ -502,7 +514,7 @@ A weight of `0.0` disables scoring for that field while still including it in `f
 | > 50 000         | Browser        | `useWorker: true`, `sortAlgorithm: 'radix'`     |
 | Any size         | Node.js        | Sync always sufficient; `Worker` not available  |
 
-Reducing `fuzzyMaxDistance` from 3 to 2 cuts the number of fuzzy candidates that reach the scoring step, which is the most CPU-intensive part of the pipeline. If you only need exact and substring matching, set `fuzzyMaxDistance: 0` to skip the Levenshtein computation entirely.
+Reducing `fuzzyMaxDistance` from 3 to 2 cuts the number of fuzzy candidates that reach the scoring step, which is the most CPU-intensive part of the pipeline. If you only need exact and substring matching, set `fuzzyMaxDistance: 0`: the fuzzy tier is then skipped entirely and no distance is computed for any value.
 
 The fuzzy tier first compares lengths: an edit distance is never smaller than the length difference, so any value whose length differs from the query by more than `fuzzyMaxDistance` is rejected with no distance computed. For the remaining candidates, queries of up to 32 characters use Myers' bit-parallel algorithm over JavaScript's 32-bit bitwise operations — O(n) in the value length, with the query's bitmask table built once per search rather than once per row. Longer queries use an Ukkonen-banded DP that costs O(n × `fuzzyMaxDistance`) and stops as soon as the bound is exceeded. Rows that fall below `threshold` allocate no result objects.
 
@@ -525,7 +537,15 @@ The `ex-search/react` subpath is tree-shakeable from the core bundle. It require
 ### Types-only import
 
 ```typescript
-import type { SearchConfig, SearchResult, FieldMatch, MatchType, SortAlgorithm } from 'ex-search/types';
+import type {
+  SearchConfig,
+  SearchOptions,
+  SearchResult,
+  FieldMatch,
+  MatchType,
+  SortAlgorithm,
+  FuzzyMode,
+} from 'ex-search/types';
 ```
 
 Use `ex-search/types` when you only need type annotations — for example, in a React component that receives `SearchResult<T>` as a prop without calling the search functions itself.
@@ -540,17 +560,20 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 | `FieldMatch`      | Per-field scoring breakdown inside `SearchResult.fieldMatches`                           |
 | `MatchType`       | `'exact' \| 'startsWith' \| 'contains' \| 'fuzzy' \| 'none'`                             |
 | `SortAlgorithm`   | `'radix' \| 'tim'`                                                                       |
+| `FuzzyMode`       | `'value' \| 'word'`: what the fuzzy tier compares the query against                      |
+| `SearchOptions`   | `{ signal?: AbortSignal }`: per-call options for `searchAsync`                           |
+| `Comparator<T>`   | `(a: T, b: T) => number`: three-way comparator for the precision searches                |
 | `ScorerAPI`       | Shape of the exported `Scorer` object                                                    |
 
 ## Peer Dependencies
 
-| Package    | Version                | Required for            |
-| ---------- | ---------------------- | ----------------------- |
-| `exsorted` | `^1.1.0`               | Core search and sorting |
-| `ex-flow`  | `^1.0.4`               | `exFlowPriority` field  |
-| `react`    | `^18.2.0` or `^19.0.0` | `ex-search/react` hooks |
+| Package    | Version                | Required for                                    |
+| ---------- | ---------------------- | ----------------------------------------------- |
+| `exsorted` | `^1.1.0`               | Core search and sorting (required)              |
+| `ex-flow`  | `^1.0.4`               | Optional: only when piping results into ex-flow |
+| `react`    | `^18.2.0` or `^19.0.0` | Optional: `ex-search/react` hooks               |
 
-All peer dependencies are optional — install only what you use. They are not bundled into `ex-search`.
+`exsorted` is a **required** peer dependency; `ex-flow` and `react` are optional. None of them is bundled into `ex-search`. `ex-search/precision` and `ex-search/types` load without any peer installed.
 
 ## Compatibility
 

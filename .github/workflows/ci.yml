@@ -6,8 +6,15 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  check:
+  # Formatting is OS-independent; run it once on Linux. On Windows runners
+  # core.autocrlf=true would otherwise turn every file into CRLF and Prettier
+  # (endOfLine "lf" by default) would fail the whole tree.
+  format:
     runs-on: ubuntu-latest
     env:
       CI: true
@@ -23,7 +30,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - name: Install dependencies
@@ -31,6 +38,43 @@ jobs:
 
       - name: Check formatting
         run: pnpm run format:check
+
+  check:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 18 = declared floor (package.json engines ">=18"); 20/22/24 = supported lines.
+        node: [18, 20, 22, 24]
+    env:
+      CI: true
+      HUSKY: 0
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Disable CRLF conversion (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Lint
         run: pnpm run lint
@@ -43,3 +87,112 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      # npm 10.8 (bundled with Node 18) still runs the `prepare` script (husky)
+      # despite --ignore-scripts; HUSKY=0 above keeps that a no-op.
+      - name: Pack tarball
+        run: |
+          WORK="$(node -p "require('path').join(require('os').tmpdir(),'ex-search-smoke').split(require('path').sep).join('/')")"
+          rm -rf "$WORK" && mkdir -p "$WORK/pack"
+          npm pack --ignore-scripts --pack-destination "$WORK/pack"
+          echo "SMOKE_WORK=$WORK" >> "$GITHUB_ENV"
+
+      - name: Smoke test packed tarball (require + import every exports subpath)
+        run: |
+          TARBALL="$(ls "$SMOKE_WORK"/pack/*.tgz)"
+          CONSUMER="$SMOKE_WORK/consumer"
+          mkdir -p "$CONSUMER" && cd "$CONSUMER"
+          echo '{ "name": "smoke-consumer", "private": true }' > package.json
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL" exsorted@^1.1.0 ex-flow@^1.0.4 react@^19
+
+          cat > smoke.cjs <<'EOF'
+          const subpaths = ['ex-search', 'ex-search/types', 'ex-search/precision', 'ex-search/react'];
+          let fail = 0;
+          for (const s of subpaths) {
+            try {
+              const m = require(s);
+              console.log(`ok   require ${s}: ${Object.keys(m).sort().join(',')}`);
+            } catch (e) {
+              fail++;
+              console.error(`FAIL require ${s}: ${e.code} ${e.message}`);
+            }
+          }
+          const { search, ExSearch, Scorer } = require('ex-search');
+          const r = search([{ n: 'Istanbul' }, { n: 'Ankara' }], 'ista', { keys: [{ name: 'n', weight: 1 }] });
+          if (r.length !== 1 || r[0].n !== 'Istanbul') { fail++; console.error('FAIL search() result', JSON.stringify(r)); }
+          if (typeof ExSearch !== 'function' || typeof Scorer !== 'object') { fail++; console.error('FAIL ExSearch/Scorer shape'); }
+          const { useExSearch, useExSearchAsync } = require('ex-search/react');
+          if (typeof useExSearch !== 'function' || typeof useExSearchAsync !== 'function') { fail++; console.error('FAIL react hooks'); }
+          console.log(`require smoke on node ${process.version}: failures=${fail}`);
+          process.exit(fail ? 1 : 0);
+          EOF
+
+          cat > smoke.mjs <<'EOF'
+          const subpaths = ['ex-search', 'ex-search/types', 'ex-search/precision', 'ex-search/react'];
+          let fail = 0;
+          for (const s of subpaths) {
+            try {
+              const m = await import(s);
+              console.log(`ok   import ${s}: ${Object.keys(m).sort().join(',')}`);
+            } catch (e) {
+              fail++;
+              console.error(`FAIL import ${s}: ${e.code} ${e.message}`);
+            }
+          }
+          const { search, ExSearch } = await import('ex-search');
+          const r = search([{ n: 'Istanbul' }, { n: 'Ankara' }], 'ista', { keys: [{ name: 'n', weight: 1 }] });
+          if (r.length !== 1 || r[0].n !== 'Istanbul') { fail++; console.error('FAIL search() result', JSON.stringify(r)); }
+          const a = new ExSearch({ keys: [{ name: 'n', weight: 1 }], useWorker: true }).setData([{ n: 'Istanbul' }]);
+          const ar = await a.searchAsync('ista'); // no global Worker in Node -> sync fallback
+          if (ar.length !== 1) { fail++; console.error('FAIL searchAsync fallback', JSON.stringify(ar)); }
+          console.log(`import smoke on node ${process.version}: failures=${fail}`);
+          process.exit(fail ? 1 : 0);
+          EOF
+
+          node smoke.cjs
+          node smoke.mjs
+
+      # ./react must share the core with the root entry (one ExSearch class,
+      # so `instanceof` agrees across entries and the code ships once).
+      - name: Smoke test shared core across entries (CJS and ESM)
+        run: |
+          cd "$SMOKE_WORK/consumer"
+          cat > shared-core.cjs <<'EOF'
+          const fs = require('fs'), path = require('path');
+          const dist = path.join(process.cwd(), 'node_modules/ex-search/dist');
+          const main = require('ex-search'); require('ex-search/react');
+          const files = [];
+          (function walk(d) { for (const f of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, f.name); if (f.isDirectory()) walk(p); else if (/\.(cjs|mjs)$/.test(p) && /(class ExSearch\b|ExSearch = class)/.test(fs.readFileSync(p, 'utf8'))) files.push(path.relative(dist, p)); } })(dist);
+          console.log('files defining ExSearch:', files);
+          if (files.length !== 2 || !(new main.ExSearch({ keys: [] }) instanceof main.ExSearch)) process.exit(1); // one .cjs + one .mjs
+          EOF
+          node shared-core.cjs
+
+      - name: Smoke test published types (skipLibCheck off)
+        run: |
+          cd "$SMOKE_WORK/consumer"
+          cat > types-smoke.mts <<'EOF'
+          import { search, type SearchResult } from 'ex-search';
+          import { exponentialSearch } from 'ex-search/precision';
+          import type { SearchConfig } from 'ex-search/types';
+          import { useExSearch } from 'ex-search/react';
+          const cfg: SearchConfig<{ n: string }> = { keys: [{ name: 'n', weight: 1 }] };
+          export const r: SearchResult<{ n: string }>[] = search([{ n: 'a' }], 'a', cfg);
+          export const i: number = exponentialSearch([1, 2, 3], 2);
+          export const h = useExSearch;
+          EOF
+          TSC="$GITHUB_WORKSPACE/node_modules/.bin/tsc"
+          "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.mts
+          "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module preserve --moduleResolution bundler types-smoke.mts
+
+      # exsorted is a required peer; ex-flow and react stay optional, so the
+      # root, ./precision and ./types entries must load with only exsorted.
+      - name: Smoke test minimal install (required peer only)
+        run: |
+          TARBALL="$(ls "$SMOKE_WORK"/pack/*.tgz)"
+          BARE="$SMOKE_WORK/bare"
+          mkdir -p "$BARE" && cd "$BARE"
+          echo '{ "name": "smoke-bare", "private": true }' > package.json
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL" exsorted@^1.1.0
+          node -e "require('ex-search'); require('ex-search/precision'); require('ex-search/types'); console.log('minimal require ok')"
+          node --input-type=module -e "await import('ex-search'); await import('ex-search/precision'); await import('ex-search/types'); console.log('minimal import ok')"

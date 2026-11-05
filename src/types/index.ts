@@ -89,6 +89,15 @@ export interface SearchConfig<T> {
   useWorker?: boolean;
 }
 
+/** Per-call options for asynchronous search. */
+export interface SearchOptions {
+  /**
+   * Cancels the search. When it aborts, any Worker is terminated and the
+   * returned Promise rejects with an `AbortError`.
+   */
+  signal?: AbortSignal;
+}
+
 // ---------------------------------------------------------------------------
 // Result
 // ---------------------------------------------------------------------------

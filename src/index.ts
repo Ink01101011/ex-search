@@ -34,6 +34,7 @@ export type { Comparator } from './core/precision';
 
 export type {
   SearchConfig,
+  SearchOptions,
   SearchKey,
   SearchResult,
   FieldMatch,
