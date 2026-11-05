@@ -187,8 +187,11 @@ jobs:
           const sharedFile = [...relDeps(path.join(dist, 'index.cjs'), /require\(["'](\.{1,2}\/[^"']+)["']\)/g)]
             .find((f) => relDeps(path.join(dist, 'react/index.cjs'), /require\(["'](\.{1,2}\/[^"']+)["']\)/g).has(f));
           const chunk = require(sharedFile);
-          if (chunk.ExSearch !== main.ExSearch) { fail++; console.error('FAIL react entry core is a different ExSearch class'); }
-          if (!(new chunk.ExSearch({ keys: [] }) instanceof main.ExSearch)) { fail++; console.error('FAIL instanceof across entries'); }
+          // Minification renames the chunk's exports (a, b, c, ...), so find the
+          // class by identity instead of by the name `ExSearch`.
+          const Cls = Object.values(chunk).find((v) => v === main.ExSearch);
+          if (!Cls) { fail++; console.error('FAIL react entry core is a different ExSearch class'); }
+          else if (!(new Cls({ keys: [] }) instanceof main.ExSearch)) { fail++; console.error('FAIL instanceof across entries'); }
           process.exit(fail ? 1 : 0);
           EOF
           node shared-core.cjs

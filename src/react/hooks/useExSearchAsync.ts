@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ExSearch } from '../../core/search';
 import type { SearchConfig, SearchResult } from '../../types';
 import { useStableConfig } from './useStableConfig';
+import { useStableData } from './useStableData';
 
 /**
  * Async search hook that optionally delegates scoring to a Web Worker.
@@ -18,14 +19,16 @@ import { useStableConfig } from './useStableConfig';
  * invalid config here is caught inside the effect and reported through `error`
  * with `results: []`.
  *
- * **Config stability** — `config` is compared by content (keys, weights and
- * every scalar field), so an inline config object is safe: it does not restart
- * the effect. Wrapping it in `useMemo` is optional.
+ * **Stability** — `config` (keys name/weight and every scalar option) and `data`
+ * (element identity) are compared by content, so inline values are safe: a new
+ * config literal or `items.filter(...)` array with equal content does not restart
+ * the effect. Treat both as immutable: mutating `config.keys` or the data array
+ * in place is not detected.
  *
  * @param data - Array of items to search.
  * @param query - Search string. An empty or whitespace-only query returns `[]`
  *   immediately without triggering a loading state.
- * @param inlineConfig - Search configuration (keys, threshold, fuzzyMaxDistance, …).
+ * @param config - Search configuration (keys, threshold, fuzzyMaxDistance, …).
  * @returns `{ results, loading, error }` — `loading` is `true` only while an
  *   async Worker search is in flight. When the async path fails the hook falls
  *   back to the synchronous search; `error` is set (and `results` emptied) only
@@ -44,9 +47,10 @@ import { useStableConfig } from './useStableConfig';
 export function useExSearchAsync<T>(
   data: T[],
   query: string,
-  inlineConfig: SearchConfig<T>,
+  config: SearchConfig<T>,
 ): { results: SearchResult<T>[]; loading: boolean; error: Error | null } {
-  const config = useStableConfig(inlineConfig);
+  const stableConfig = useStableConfig(config);
+  const stableData = useStableData(data);
   const [results, setResults] = useState<SearchResult<T>[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -69,17 +73,17 @@ export function useExSearchAsync<T>(
 
     let searcher: ExSearch<T>;
     try {
-      if (searcherRef.current === null || appliedConfig.current !== config) {
+      if (searcherRef.current === null || appliedConfig.current !== stableConfig) {
         // A new config identity gets a fresh searcher (as useExSearch does) so
         // omitted or undefined fields reset to their defaults, like search().
-        searcherRef.current = new ExSearch(config);
-        appliedConfig.current = config;
+        searcherRef.current = new ExSearch(stableConfig);
+        appliedConfig.current = stableConfig;
         appliedData.current = null;
       }
       searcher = searcherRef.current;
-      if (appliedData.current !== data) {
-        searcher.setData(data);
-        appliedData.current = data;
+      if (appliedData.current !== stableData) {
+        searcher.setData(stableData);
+        appliedData.current = stableData;
       }
     } catch (err) {
       // An invalid config must not throw out of the effect: surface it as `error`.
@@ -121,7 +125,7 @@ export function useExSearchAsync<T>(
       cancelled = true;
       controller.abort(); // terminates a superseded or unmounted Worker search
     };
-  }, [data, query, config]);
+  }, [stableData, query, stableConfig]);
 
   return { results, loading, error };
 }

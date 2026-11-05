@@ -1,7 +1,18 @@
 import { useRef } from 'react';
 import type { SearchConfig } from '../../types';
 
-const SCALARS = ['threshold', 'fuzzyMaxDistance', 'caseSensitive', 'sortAlgorithm', 'useWorker', 'fuzzyMode'] as const;
+type Scalar = Exclude<keyof SearchConfig<unknown>, 'keys'>;
+const SCALARS = [
+  'threshold',
+  'fuzzyMaxDistance',
+  'caseSensitive',
+  'sortAlgorithm',
+  'useWorker',
+  'fuzzyMode',
+] as const satisfies readonly Scalar[];
+// A new SearchConfig field fails typecheck here until it is added to SCALARS.
+type Exhaustive = Exclude<Scalar, (typeof SCALARS)[number]> extends never ? true : never;
+export const SCALARS_EXHAUSTIVE: Exhaustive = true;
 
 /** Structural equality of two configs (keys element-wise, every scalar field). `Object.is` so NaN equals NaN. */
 export function configEqual<T>(a: SearchConfig<T>, b: SearchConfig<T>): boolean {

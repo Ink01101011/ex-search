@@ -205,7 +205,7 @@ import { useExSearch } from 'ex-search/react';
 function BranchList({ branches }: { branches: Branch[] }) {
   const [query, setQuery] = useState('');
 
-  // Wrap config in useMemo so its reference stays stable across renders
+  // An inline config is fine too: config and data are compared by content (see below)
   const config = useMemo(
     () => ({
       keys: [
@@ -229,6 +229,8 @@ function BranchList({ branches }: { branches: Branch[] }) {
 ```
 
 `useExSearch` runs synchronously inside `useMemo`, so results are ready on the **first server render** — no loading state or layout shift.
+
+**`config` and `data` are compared by content, so inline values are safe.** `config` is compared by its keys (`name` and `weight`) and options, and `data` by element identity (same length and every element `===`). A fresh `{ keys: [...] }` literal or an `items.filter(...)` array with equal content does not re-run the search or restart the effect, and neither hook loops. Treat both as **immutable**: mutating a config's `keys` array, or the `data` array, in place is not detected, so pass a new array (or a new config) to change them. `useMemo` around them is optional.
 
 #### `useExSearchAsync` — Worker-backed, large datasets
 
@@ -387,7 +389,7 @@ controller.abort(); // pending rejects with an AbortError (name === 'AbortError'
 
 ### `useExSearch<T>(data, query, config)` · `ex-search/react`
 
-Synchronous search hook. Wraps `search()` in `useMemo`; re-runs when any dependency changes.
+Synchronous search hook. Wraps the search in `useMemo`; re-runs when `data`, `query` or `config` change in content (see below).
 
 ```typescript
 function useExSearch<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[];
