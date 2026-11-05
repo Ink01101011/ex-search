@@ -287,6 +287,46 @@ searchResults.forEach((result) => {
 const plan = flow.resolveExecutionPlan();
 ```
 
+## Precision search on sorted arrays
+
+When your data is already sorted ascending and you need an exact lookup (not
+fuzzy ranking), use the precision searches. They return the index of a matching
+element, or `-1`. With duplicates, any matching index may be returned. Inputs
+are never sorted or mutated.
+
+```ts
+import { exponentialSearch, fibonacciSearch, interpolationSearch } from 'ex-search';
+
+const ids = [2, 4, 8, 16, 32, 64];
+
+exponentialSearch(ids, 16); // 3
+fibonacciSearch(ids, 64); // 5
+interpolationSearch(ids, 5); // -1
+
+// Custom comparator (objects) and numeric key (interpolation)
+const rows = [{ ts: 100 }, { ts: 200 }, { ts: 300 }];
+exponentialSearch(rows, { ts: 200 }, (a, b) => a.ts - b.ts); // 1
+interpolationSearch(rows, 300, (r) => r.ts); // 2
+```
+
+| Function              | Best for                         | Time                                 | Needs       |
+| --------------------- | -------------------------------- | ------------------------------------ | ----------- |
+| `exponentialSearch`   | Target near the front, huge data | O(log i)                             | comparator  |
+| `fibonacciSearch`     | Comparison-only, no division     | O(log n)                             | comparator  |
+| `interpolationSearch` | Uniformly distributed numbers    | O(log log n) uniform, O(log n) worst | numeric key |
+
+`interpolationSearch` falls back to plain bisection when interpolation does not converge, so skewed data cannot make it linear. Its `key` argument is optional only for `number[]`; for any other element type TypeScript requires it.
+
+With the default comparator the array must not contain holes, `undefined` or `NaN`: the default comparator returns `0` for incomparable values, so they would be treated as matches. A `NaN` target returns `-1` under the default comparator; if you pass your own comparator (for example one that sorts `NaN` last) it is used as-is.
+
+### Standalone import
+
+```ts
+import { exponentialSearch, fibonacciSearch, interpolationSearch } from 'ex-search/precision';
+```
+
+`ex-search/precision` has zero imports, so bundlers never pull in `exsorted` or the fuzzy engine. The root entry re-exports the same functions.
+
 ## API Reference
 
 ### `search<T>(data, query, config)`

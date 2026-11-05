@@ -48,6 +48,11 @@
       "import": "./dist/types/index.mjs",
       "require": "./dist/types/index.cjs"
     },
+    "./precision": {
+      "types": "./dist/precision.d.ts",
+      "import": "./dist/precision.mjs",
+      "require": "./dist/precision.cjs"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "import": "./dist/react/index.mjs",
