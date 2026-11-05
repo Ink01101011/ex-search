@@ -18,11 +18,19 @@
  * ───────
  *  radixSort (exsorted): O(n) — score × 1_000_000 as integer key, descending
  *  timSort   (exsorted): O(n log n) stable — used when sortAlgorithm = 'tim'
+ *
+ * Precision search
+ * ────────────────
+ *  exponentialSearch / fibonacciSearch / interpolationSearch locate a value in
+ *  an already ascending-sorted array and return its index (or -1).
  */
 
 export { search, createSearch, ExSearch } from './core/search';
 
 export { Scorer } from './core/scorer';
+
+export { exponentialSearch, fibonacciSearch, interpolationSearch } from './core/precision';
+export type { Comparator } from './core/precision';
 
 export type {
   SearchConfig,
