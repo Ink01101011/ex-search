@@ -44,4 +44,4 @@ export type {
   ScorerAPI,
 } from './types';
 
-export type { ExFlowResultItem } from 'ex-flow';
+export type { ExFlowResultItem } from './types';

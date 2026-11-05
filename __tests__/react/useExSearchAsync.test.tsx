@@ -81,4 +81,34 @@ describe('useExSearchAsync', () => {
     // No setState-after-unmount warning or unhandled rejection should occur.
     expect(() => unmount()).not.toThrow();
   });
+
+  it('resets omitted/undefined config fields to defaults when config identity changes (N1)', async () => {
+    const keys = [{ name: 'name' as const, weight: 1 }];
+    const rows = [{ name: 'applesauce' }];
+    let config: { keys: typeof keys; threshold?: number } = { keys, threshold: 0.9 };
+    const { result, rerender } = renderHook(() => useExSearchAsync(rows, 'apple', config));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.results).toHaveLength(0); // threshold 0.9 filters it out
+
+    config = { keys, threshold: undefined };
+    rerender();
+    await waitFor(() => expect(result.current.results).toHaveLength(1));
+  });
+
+  it('keeps one searcher across keystrokes when config and data are stable (F7)', async () => {
+    let query = 'Al';
+    const { result, rerender } = renderHook(() => useExSearchAsync(DATA, query, CONFIG));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    query = 'Ali';
+    rerender();
+    await waitFor(() => expect(result.current.results[0]?.name).toBe('Alice'));
+  });
+
+  it('reports an invalid config through error instead of throwing from the effect (N4)', async () => {
+    const bad = { keys: [{ name: 'name' as const, weight: 1 }], threshold: Number.NaN };
+    const { result } = renderHook(() => useExSearchAsync(DATA, 'Alice', bad));
+    await waitFor(() => expect(result.current.error).toBeInstanceOf(Error));
+    expect(result.current.results).toEqual([]);
+    expect(result.current.loading).toBe(false);
+  });
 });

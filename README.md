@@ -7,7 +7,7 @@
 [![Bundle size](https://img.shields.io/bundlephobia/minzip/ex-search)](https://bundlephobia.com/package/ex-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` with a four-tier match pipeline — exact, starts-with, contains, and fuzzy — weighted per field and ranked using `radixSort` or `timSort` from [exsorted](https://www.npmjs.com/package/exsorted). Results carry an `exFlowPriority` field so they plug directly into [ex-flow](https://www.npmjs.com/package/ex-flow) pipelines.
+Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` with a four-tier match pipeline — exact, starts-with, contains, and fuzzy — weighted per field and ranked using `radixSort` or `timSort` from [exsorted](https://www.npmjs.com/package/exsorted). Results carry an `exFlowPriority` field that is a ready-made `priority` value for [ex-flow](https://www.npmjs.com/package/ex-flow) pipelines (see [Piping results into ex-flow](#6-piping-results-into-ex-flow)).
 
 ## Features
 
@@ -18,7 +18,7 @@ Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` wi
 - **Pluggable sort backend** — choose `radixSort` (O(n), best for large result sets) or `timSort` (O(n log n) stable)
 - **Web Worker support** — offload scoring to a Worker thread in browser environments to keep the UI responsive
 - **React hooks** — `useExSearch` (sync, SSR-safe) and `useExSearchAsync` (Worker-backed) via `ex-search/react`
-- **ex-flow compatible** — every result includes `exFlowPriority` mirroring the normalized score
+- **ex-flow ready** — every result includes `exFlowPriority` (the normalized score ×100), ready to use as an ex-flow node `priority`
 - **Fully typed** — complete TypeScript generics; no `any` in public API
 - **Dual module support** — ships as both ESM and CommonJS
 - **Tree-shakeable** — import only `Scorer` utilities or the React hooks subpath independently
@@ -144,7 +144,7 @@ searcher.setData(branches);
 // Call search as many times as needed without re-configuring
 const r1 = searcher.search('สยาม');
 const r2 = searcher.search('ลาดพร้าว');
-const r3 = searcher.search('ลาดพร้าา'); // fuzzy → still matches 'ลาดพร้าว' (distance 1 ≤ fuzzyMaxDistance)
+const r3 = searcher.search('สาขาสยามพารากอม'); // last letter mistyped → fuzzy tier still matches 'สาขาสยามพารากอน' (whole-value distance 1)
 ```
 
 #### Typos inside multi-word values — `fuzzyMode: 'word'`
@@ -269,27 +269,23 @@ A search that is superseded by a newer query, or whose component unmounts, is **
 
 ### 6. Piping results into ex-flow
 
-Every `SearchResult<T>` carries `exFlowPriority = Math.round(score × 100)`, which is the field `ex-flow` reads for priority ordering. No transformation is needed.
+Every `SearchResult<T>` carries `exFlowPriority = Math.round(score × 100)`. That number is a ready-made ex-flow `priority`, but ex-flow **reserves** the `exFlowPriority` field inside a node's `data` (`addEntity` throws `EXFLOW_RESERVED_FIELD` if it is present). So a result cannot be passed as `data` as-is: lift `exFlowPriority` out into the node's `priority` and keep the rest as `data`.
 
 ```typescript
 import { search } from 'ex-search';
 import { ExFlow } from 'ex-flow';
 
-const searchResults = search(branches, 'สยาม', config);
+const results = search(branches, 'สยาม', config);
 
 const flow = new ExFlow<Branch>({ priorityAscending: false });
-
-searchResults.forEach((result) => {
-  flow.addEntity({
-    id: result.id,
-    data: result,
-    dependsOn: [],
-    // exFlowPriority is already set by ex-search — no manual mapping required
-  });
-});
-
+for (const { exFlowPriority, score, fieldMatches, ...branch } of results) {
+  flow.addEntity({ id: branch.id, data: branch, dependsOn: [], priority: exFlowPriority });
+}
 const plan = flow.resolveExecutionPlan();
+// plan.fullSequence is ordered by score, highest first
 ```
+
+`priorityAscending: false` makes higher priorities run first, which matches ranking order. This exact example is covered by `__tests__/exflow.test.ts`.
 
 ## Precision search on sorted arrays
 
@@ -385,7 +381,7 @@ const pending = searcher.searchAsync('สยาม', { signal: controller.signal
 controller.abort(); // pending rejects with an AbortError (name === 'AbortError')
 ```
 
-**Deployment notes** — the Worker is created from a `blob:` URL. A Content-Security-Policy must allow it with `worker-src blob:` (or `child-src blob:`), and pages that enforce Trusted Types block blob Workers. In both cases `searchAsync` silently falls back to the synchronous path. Deno needs module Workers, which this release does not enable (unverified).
+**Deployment notes** — the Worker is created from a `blob:` URL. A Content-Security-Policy must allow it with `worker-src blob:` (or `child-src blob:`), and pages that enforce Trusted Types block blob Workers. If the block makes `new Worker(...)` throw synchronously, `searchAsync` falls back to the synchronous path. If the browser instead reports the block later through an asynchronous Worker `error` event, `searchAsync` **rejects**; `useExSearchAsync` catches that rejection and falls back to the synchronous search itself. Behaviour differs between browsers, so if you call `searchAsync` directly under a restrictive CSP, handle the rejection (or allow `blob:` workers). Deno needs module Workers, which this release does not enable (unverified).
 
 ---
 
@@ -564,6 +560,24 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 | `SearchOptions`   | `{ signal?: AbortSignal }`: per-call options for `searchAsync`                           |
 | `Comparator<T>`   | `(a: T, b: T) => number`: three-way comparator for the precision searches                |
 | `ScorerAPI`       | Shape of the exported `Scorer` object                                                    |
+
+## Upgrading from 1.x
+
+Behaviour changes in 2.0.0:
+
+- **Query is trimmed.** Leading and trailing whitespace is removed before matching; a blank query returns `[]`.
+- **Only primitive values are searchable.** Values of type `string`, `number`, `bigint` and `boolean` are matched. Objects, arrays and `String` objects no longer match, and `null`/`undefined` rows are skipped.
+- **Invalid configuration throws.** Bad `keys`, weights or `threshold` now raise `TypeError`/`RangeError` from `search()`, the `ExSearch` constructor, `updateConfig`, and `useExSearch` during render. (`useExSearchAsync` reports them through its `error` field instead.)
+- **`updateConfig` ignores explicit `undefined`.** A field set to `undefined` keeps its current value; build a new `ExSearch` to reset fields to defaults.
+- **`exsorted` is a required peer dependency.** Install it alongside `ex-search`. `react` and `ex-flow` stay optional.
+- **ex-flow usage.** Results cannot be handed to `addEntity` as `data` unchanged; lift `exFlowPriority` into `priority` (see [Piping results into ex-flow](#6-piping-results-into-ex-flow)).
+- **The Worker receives key texts only.** The Worker now posts just the searchable key texts rather than whole rows.
+
+Additive APIs in 2.0.0:
+
+- `searchAsync(query, { signal })` — cancel a pending search with an `AbortSignal`.
+- `useExSearchAsync` returns an `error` field.
+- `ex-search/precision` — `exponentialSearch`, `fibonacciSearch` and `interpolationSearch` on sorted arrays.
 
 ## Peer Dependencies
 

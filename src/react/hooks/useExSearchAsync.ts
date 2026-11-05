@@ -13,6 +13,10 @@ import type { SearchConfig, SearchResult } from '../../types';
  * **SSR-safe** — `useEffect` is skipped during server rendering; the hook
  * returns `{ results: [], loading: false }` on first paint without suspending.
  *
+ * **Invalid config** — unlike `useExSearch` (which throws during render), an
+ * invalid config here is caught inside the effect and reported through `error`
+ * with `results: []`.
+ *
  * **Config stability** — wrap `config` in `useMemo` to prevent the effect from
  * restarting on every render when the config object is defined inline.
  *
@@ -60,18 +64,29 @@ export function useExSearchAsync<T>(
     const controller = new AbortController();
     let cancelled = false;
 
-    if (searcherRef.current === null) {
-      searcherRef.current = new ExSearch(config);
-      appliedConfig.current = config;
-    }
-    const searcher = searcherRef.current;
-    if (appliedConfig.current !== config) {
-      searcher.updateConfig(config);
-      appliedConfig.current = config;
-    }
-    if (appliedData.current !== data) {
-      searcher.setData(data);
-      appliedData.current = data;
+    let searcher: ExSearch<T>;
+    try {
+      if (searcherRef.current === null || appliedConfig.current !== config) {
+        // A new config identity gets a fresh searcher (as useExSearch does) so
+        // omitted or undefined fields reset to their defaults, like search().
+        searcherRef.current = new ExSearch(config);
+        appliedConfig.current = config;
+        appliedData.current = null;
+      }
+      searcher = searcherRef.current;
+      if (appliedData.current !== data) {
+        searcher.setData(data);
+        appliedData.current = data;
+      }
+    } catch (err) {
+      // An invalid config must not throw out of the effect: surface it as `error`.
+      searcherRef.current = null;
+      appliedConfig.current = null;
+      appliedData.current = null;
+      setResults([]);
+      setError(toError(err));
+      setLoading(false);
+      return;
     }
     setLoading(true);
 

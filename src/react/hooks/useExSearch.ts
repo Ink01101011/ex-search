@@ -9,6 +9,9 @@ import type { SearchConfig, SearchResult } from '../../types';
  * **SSR-safe** — `useMemo` executes during server rendering, so results are
  * available on the first paint without a client-side waterfall.
  *
+ * **Invalid config** — throws a `TypeError`/`RangeError` during render (catch it
+ * with an error boundary). `useExSearchAsync` reports it through `error` instead.
+ *
  * **Config stability** — wrap `config` in `useMemo` to prevent redundant
  * re-computations when the config object is defined inline in the component.
  *

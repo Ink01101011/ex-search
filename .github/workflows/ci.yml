@@ -88,6 +88,11 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      # prepublishOnly publishes the minified build, so the tarball smoke tests
+      # below must run against that output, not the unminified one.
+      - name: Minify (prepublishOnly output)
+        run: pnpm run minify
+
       # npm 10.8 (bundled with Node 18) still runs the `prepare` script (husky)
       # despite --ignore-scripts; HUSKY=0 above keeps that a no-op.
       - name: Pack tarball
@@ -152,19 +157,30 @@ jobs:
           node smoke.cjs
           node smoke.mjs
 
-      # ./react must share the core with the root entry (one ExSearch class,
-      # so `instanceof` agrees across entries and the code ships once).
+      # ./react must share the core with the root entry: both entries have to
+      # import the same chunk file (one ExSearch class, shipped once). The check
+      # follows relative imports, so it survives minification (no class-name regex).
       - name: Smoke test shared core across entries (CJS and ESM)
         run: |
           cd "$SMOKE_WORK/consumer"
           cat > shared-core.cjs <<'EOF'
           const fs = require('fs'), path = require('path');
           const dist = path.join(process.cwd(), 'node_modules/ex-search/dist');
+          const relDeps = (file, re) => {
+            const src = fs.readFileSync(file, 'utf8');
+            return new Set([...src.matchAll(re)].map((m) => path.resolve(path.dirname(file), m[1])));
+          };
+          let fail = 0;
+          for (const [ext, re] of [['cjs', /require\(["'](\.{1,2}\/[^"']+)["']\)/g], ['mjs', /from\s*["'](\.{1,2}\/[^"']+)["']/g]]) {
+            const main = relDeps(path.join(dist, `index.${ext}`), re);
+            const react = relDeps(path.join(dist, `react/index.${ext}`), re);
+            const shared = [...main].filter((f) => react.has(f));
+            console.log(`${ext}: index -> ${[...main].map((f) => path.relative(dist, f))}; react -> ${[...react].map((f) => path.relative(dist, f))}; shared -> ${shared.map((f) => path.relative(dist, f))}`);
+            if (shared.length === 0 || !shared.every((f) => fs.existsSync(f))) { fail++; console.error(`FAIL ${ext}: entries do not share a chunk`); }
+          }
           const main = require('ex-search'); require('ex-search/react');
-          const files = [];
-          (function walk(d) { for (const f of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, f.name); if (f.isDirectory()) walk(p); else if (/\.(cjs|mjs)$/.test(p) && /(class ExSearch\b|ExSearch = class)/.test(fs.readFileSync(p, 'utf8'))) files.push(path.relative(dist, p)); } })(dist);
-          console.log('files defining ExSearch:', files);
-          if (files.length !== 2 || !(new main.ExSearch({ keys: [] }) instanceof main.ExSearch)) process.exit(1); // one .cjs + one .mjs
+          if (!(new main.ExSearch({ keys: [] }) instanceof main.ExSearch)) fail++;
+          process.exit(fail ? 1 : 0);
           EOF
           node shared-core.cjs
 
@@ -181,9 +197,10 @@ jobs:
           export const i: number = exponentialSearch([1, 2, 3], 2);
           export const h = useExSearch;
           EOF
-          TSC="$GITHUB_WORKSPACE/node_modules/.bin/tsc"
-          "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.mts
-          "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module preserve --moduleResolution bundler types-smoke.mts
+          # Call tsc through node: .bin/tsc is a shell/cmd shim on Windows runners.
+          TSC="$GITHUB_WORKSPACE/node_modules/typescript/bin/tsc"
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.mts
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module preserve --moduleResolution bundler types-smoke.mts
 
       # exsorted is a required peer; ex-flow and react stay optional, so the
       # root, ./precision and ./types entries must load with only exsorted.
@@ -196,3 +213,34 @@ jobs:
           npm install --ignore-scripts --no-audit --no-fund "$TARBALL" exsorted@^1.1.0
           node -e "require('ex-search'); require('ex-search/precision'); require('ex-search/types'); console.log('minimal require ok')"
           node --input-type=module -e "await import('ex-search'); await import('ex-search/precision'); await import('ex-search/types'); console.log('minimal import ok')"
+
+      # ex-flow is an optional peer: the published typings must not import it.
+      # Here only exsorted and react (for ./react types) are installed, with
+      # skipLibCheck off, so a stray `from 'ex-flow'` in any .d.ts fails TS2307.
+      - name: Smoke test published types without ex-flow (skipLibCheck off)
+        run: |
+          TARBALL="$(ls "$SMOKE_WORK"/pack/*.tgz)"
+          NOFLOW="$SMOKE_WORK/noflow"
+          mkdir -p "$NOFLOW" && cd "$NOFLOW"
+          echo '{ "name": "smoke-noflow", "private": true }' > package.json
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL" exsorted@^1.1.0 react@^19 @types/react@^19
+          if [ -e node_modules/ex-flow ]; then echo "ex-flow must not be installed here"; exit 1; fi
+          # Doc comments may mention ex-flow; only an import/require of it is a defect.
+          if grep -rlE "(from|import|require)[ (]*['\"]ex-flow" node_modules/ex-search/dist --include='*.d.ts' --include='*.d.mts'; then
+            echo "published typings import ex-flow"; exit 1
+          fi
+          cat > types-smoke.mts <<'EOF'
+          import { search, type SearchResult, type ExFlowResultItem } from 'ex-search';
+          import { exponentialSearch } from 'ex-search/precision';
+          import type { SearchConfig, ExFlowResultItem as TypesItem } from 'ex-search/types';
+          import { useExSearch, useExSearchAsync } from 'ex-search/react';
+          const cfg: SearchConfig<{ n: string }> = { keys: [{ name: 'n', weight: 1 }] };
+          export const r: SearchResult<{ n: string }>[] = search([{ n: 'a' }], 'a', cfg);
+          export const f: ExFlowResultItem<{ n: string }> = { n: 'a', exFlowPriority: 1 };
+          export const t: TypesItem<{ n: string }> = f;
+          export const i: number = exponentialSearch([1, 2, 3], 2);
+          export const h = [useExSearch, useExSearchAsync];
+          EOF
+          TSC="$GITHUB_WORKSPACE/node_modules/typescript/bin/tsc"
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.mts
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module preserve --moduleResolution bundler types-smoke.mts
