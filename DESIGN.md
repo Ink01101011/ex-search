@@ -33,7 +33,7 @@ query + field value
 | radixSort | exsorted | O(n)       | Large result sets  |
 | timSort   | exsorted | O(n log n) | Stable / tie-heavy |
 
-radixSort key: `Math.round((1 − score) × 1_000_000)` (negated for descending).
+radixSort key: `Math.round((1 − score) × 1_000_000)` (negated for descending), clamped to the safe-integer range. The key rounds to 1e-6, so after the radix pass each run of equal keys is re-ordered by exact score (stable), which keeps `radix` identical to `tim` for near-ties.
 
 ## Public API surface
 
@@ -45,7 +45,7 @@ search<T>(data, query, config) → SearchResult<T>[]
 new ExSearch<T>(config)
   .setData(data)
   .search(query)          → SearchResult<T>[]
-  .searchAsync(query)     → Promise<SearchResult<T>[]>
+  .searchAsync(query, { signal? }) → Promise<SearchResult<T>[]>   (AbortSignal terminates the Worker)
 
 // Factory
 createSearch<T>(config)   → ExSearch<T>
@@ -53,6 +53,7 @@ createSearch<T>(config)   → ExSearch<T>
 // Low-level
 Scorer.exact(a, b, cs?)
 Scorer.startsWith(text, query, cs?)
+Scorer.contains(text, query, cs?)
 Scorer.fuzzy(a, b, maxDist?, cs?)
 Scorer.levenshtein(a, b)          ← Myers O(n) for m ≤ 32, banded DP beyond
 ```
@@ -60,21 +61,21 @@ Scorer.levenshtein(a, b)          ← Myers O(n) for m ≤ 32, banded DP beyond
 ## Result shape
 
 ```ts
-SearchResult<T> = T & {
+SearchResult<T> = Omit<T, 'exFlowPriority'> & {
   score:          number;        // 0.0–1.0
   fieldMatches:   FieldMatch[];  // per-field breakdown
-  exFlowPriority: number;        // score × 100 — ready for ex-flow pipelines
+  exFlowPriority: number;        // Math.round(best weighted field score), i.e. ≈ score × 100
 }
 ```
 
 ## Performance notes
 
-| Scenario             | Recommended config                            |
-| -------------------- | --------------------------------------------- |
-| < 10 k rows, browser | default (sync, radix)                         |
-| 10 k–50 k, browser   | sortAlgorithm: 'radix', fuzzyMaxDistance: 2   |
-| > 50 k, browser      | useWorker: true (scores in Worker, sort main) |
-| Node.js / server     | sync always fine; Worker not available        |
+| Scenario             | Recommended config                                |
+| -------------------- | ------------------------------------------------- |
+| < 10 k rows, browser | default (sync, radix)                             |
+| 10 k–50 k, browser   | sortAlgorithm: 'radix', fuzzyMaxDistance: 2       |
+| > 50 k, browser      | useWorker: true (scores in Worker, ranks on main) |
+| Node.js / server     | sync always fine; Worker not available            |
 
 ## Fuzzy tier internals
 
@@ -83,8 +84,10 @@ factory whose source text is also embedded in the Web Worker, so the main
 thread and the Worker run identical code.
 
 1. **Length filter** — `|len(value) − len(query)| > fuzzyMaxDistance` ⇒ no
-   match, no distance computed. `fuzzyMaxDistance: 0` therefore skips the
-   fuzzy tier entirely.
+   match, no distance computed.
+   `fuzzyMaxDistance: 0` skips the fuzzy tier entirely (no distance is
+   computed for any value, not even same-length ones; exact is already
+   handled by tier 1).
 2. **Per-query matcher** — the query's Myers bitmask table (`peq`) is built
    once per search and reused for every row × key.
 3. **Distance** — Myers bit-parallel when the query is ≤ 32 chars (one 32-bit
@@ -95,3 +98,39 @@ thread and the Worker run identical code.
    and drops the cache on `setData` / `updateConfig`.
 5. **Allocation** — per-key scores go into reusable arrays; `fieldMatches` and
    the result object are built only for rows at or above `threshold`.
+
+## Worker design
+
+`searchAsync` with `useWorker: true` splits the work so the result is
+identical to `search()`:
+
+1. **Main thread** extracts the key texts of every row with the kernel's
+   `toText` (strings as-is; number / bigint / boolean via `String()`; anything
+   else, including `null`, objects, arrays, functions and symbols, has no text
+   and scores as no match; a `null` row is skipped). Only this flat array of
+   strings plus a plain config (key names as strings, weights, threshold, ...)
+   is posted. Rows themselves never cross the boundary, so functions, symbols,
+   getters and `Symbol` key names cannot cause a `DataCloneError`.
+2. **Worker** runs the shared kernel (`scoreRows`) and posts back hits: row
+   index, best score and the per-field breakdown. It does not sort.
+3. **Main thread** builds result objects from the original rows (identity of
+   nested values is preserved) and ranks them with the configured algorithm.
+
+If the Worker cannot be created or fed (CSP `worker-src`, Trusted Types, a
+failing `postMessage`) `searchAsync` falls back to the synchronous path. A
+Worker runtime error rejects. An `AbortSignal` terminates the Worker and
+rejects with an `AbortError`. All teardown goes through one `cleanup()`. The
+Blob URL is created once per module.
+
+The worker source is `Function.prototype.toString()` of `workerEntry` and
+`createKernel`, prefixed with a `__name` shim so toolchains that inject that
+helper (esbuild `keepNames`, tsx) cannot break it. Both functions must stay
+self-contained.
+
+## Packaging
+
+`exsorted` is a required peer dependency; `react` and `ex-flow` are optional.
+The `./react` entry shares one core chunk with the root entry (tsup
+`splitting`), so there is a single `ExSearch` class per module format and
+`instanceof` agrees across entries. `exports` uses nested `import` / `require`
+conditions so ESM consumers get `.d.mts` and CJS consumers `.d.ts`.

@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
-import { search } from '../../core/search';
+import { ExSearch } from '../../core/search';
 import type { SearchConfig, SearchResult } from '../../types';
+import { useStableConfig } from './useStableConfig';
+import { useStableData } from './useStableData';
 
 /**
  * Synchronous search hook. Runs the full scoring pipeline on every render
@@ -9,8 +11,14 @@ import type { SearchConfig, SearchResult } from '../../types';
  * **SSR-safe** — `useMemo` executes during server rendering, so results are
  * available on the first paint without a client-side waterfall.
  *
- * **Config stability** — wrap `config` in `useMemo` to prevent redundant
- * re-computations when the config object is defined inline in the component.
+ * **Invalid config** — throws a `TypeError`/`RangeError` during render (catch it
+ * with an error boundary). `useExSearchAsync` reports it through `error` instead.
+ *
+ * **Stability** — `config` (keys name/weight and every scalar option) and `data`
+ * (element identity) are compared by content, so inline values are safe: a new
+ * config literal or `items.filter(...)` array with equal content does not rebuild
+ * the searcher. Treat both as immutable: mutating `config.keys` or the data array
+ * in place is not detected.
  *
  * @param data - Array of items to search.
  * @param query - Search string. An empty or whitespace-only query returns `[]`.
@@ -26,5 +34,10 @@ import type { SearchConfig, SearchResult } from '../../types';
  * const results = useExSearch(branches, query, config);
  */
 export function useExSearch<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[] {
-  return useMemo(() => search(data, query, config), [data, query, config]);
+  const stableConfig = useStableConfig(config);
+  const stableData = useStableData(data);
+  // One searcher per (data, config): in fuzzyMode 'word' its token cache then
+  // survives query changes instead of re-tokenising every row per keystroke.
+  const searcher = useMemo(() => new ExSearch(stableConfig).setData(stableData), [stableData, stableConfig]);
+  return useMemo(() => searcher.search(query), [searcher, query]);
 }

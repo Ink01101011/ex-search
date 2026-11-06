@@ -39,24 +39,44 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./types": {
-      "types": "./dist/types/index.d.ts",
-      "import": "./dist/types/index.mjs",
-      "require": "./dist/types/index.cjs"
+      "import": {
+        "types": "./dist/types/index.d.mts",
+        "default": "./dist/types/index.mjs"
+      },
+      "require": {
+        "types": "./dist/types/index.d.ts",
+        "default": "./dist/types/index.cjs"
+      }
     },
     "./precision": {
-      "types": "./dist/precision.d.ts",
-      "import": "./dist/precision.mjs",
-      "require": "./dist/precision.cjs"
+      "import": {
+        "types": "./dist/precision.d.mts",
+        "default": "./dist/precision.mjs"
+      },
+      "require": {
+        "types": "./dist/precision.d.ts",
+        "default": "./dist/precision.cjs"
+      }
     },
     "./react": {
-      "types": "./dist/react/index.d.ts",
-      "import": "./dist/react/index.mjs",
-      "require": "./dist/react/index.cjs"
+      "import": {
+        "types": "./dist/react/index.d.mts",
+        "default": "./dist/react/index.mjs"
+      },
+      "require": {
+        "types": "./dist/react/index.d.ts",
+        "default": "./dist/react/index.cjs"
+      }
     }
   },
   "sideEffects": false,
@@ -85,9 +105,6 @@
   },
   "peerDependenciesMeta": {
     "ex-flow": {
-      "optional": true
-    },
-    "exsorted": {
       "optional": true
     },
     "react": {

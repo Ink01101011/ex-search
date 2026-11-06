@@ -104,12 +104,13 @@ export function fibonacciSearch<T>(arr: readonly T[], target: T, compare?: Compa
       fib1 = fib2;
       fib2 = fib - fib1;
       offset = i;
-    } else if (c > 0) {
+    } else if (c === 0) {
+      return i;
+    } else {
+      // Greater, or incomparable (NaN): treated as "greater", like exponentialSearch.
       fib = fib2;
       fib1 = fib1 - fib2;
       fib2 = fib - fib1;
-    } else {
-      return i;
     }
   }
 
@@ -164,7 +165,10 @@ export function interpolationSearch<T>(arr: readonly T[], target: number, key?: 
     let pos: number;
     if (interpolations > 0) {
       interpolations--;
-      pos = a + Math.floor(((target - keyA) * (b - a)) / (keyB - keyA));
+      const span = keyB - keyA;
+      // An infinite or non-finite span (an Infinity bound) gives no usable
+      // interpolation: bisect right away instead of creeping from a + 1.
+      pos = Number.isFinite(span) ? a + Math.floor(((target - keyA) * (b - a)) / span) : a + Math.floor((b - a) / 2);
       if (!Number.isFinite(pos)) pos = a + Math.floor((b - a) / 2);
       pos = Math.min(b - 1, Math.max(a + 1, pos));
     } else {

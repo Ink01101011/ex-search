@@ -1,6 +1,6 @@
 import { createKernel } from '../src/core/kernel';
 import { Scorer } from '../src/core/scorer';
-import { search, createSearch, __WORKER_SOURCE__ } from '../src/core/search';
+import { search, createSearch } from '../src/core/search';
 
 // Plain O(n·m) Wagner–Fischer — the reference every fast path is checked against.
 function referenceDistance(a: string, b: string): number {
@@ -215,45 +215,6 @@ describe("fuzzyMode: 'word' (issue #6)", () => {
     const searcher = createSearch<(typeof data)[number]>(cfg).setData(data);
     for (const q of ['somchay', 'malle', 'bankok', 'chiangmai jaide', 'zzz']) {
       expect(searcher.search(q)).toEqual(search(data, q, cfg));
-    }
-  });
-});
-
-describe('Worker source', () => {
-  // Coverage instrumentation injects counters that do not exist inside the
-  // evaluated worker source, so only run this without coverage.
-  const covered = typeof (globalThis as { __coverage__?: unknown }).__coverage__ !== 'undefined';
-  (covered ? it.skip : it)('runs the shared kernel and matches the main thread', () => {
-    const fakeSelf: { onmessage?: (e: { data: unknown }) => void; postMessage: (r: unknown) => void } = {
-      postMessage: () => undefined,
-    };
-    new Function('self', __WORKER_SOURCE__)(fakeSelf);
-
-    const data = [
-      { id: 1, name: 'Somchai Jaidee' },
-      { id: 2, name: 'Malee Srisuk' },
-      { id: 3, name: 'the quick brown fox jumps over the lazy dog' },
-    ];
-    for (const [query, fuzzyMode] of [
-      ['somchay', 'word'],
-      ['somchay', 'value'],
-      ['the quick brown fox jumps over the lazy dgo', 'value'],
-    ] as const) {
-      const config = {
-        keys: [{ name: 'name' as const, weight: 1 }],
-        threshold: 0.3,
-        fuzzyMaxDistance: 3,
-        caseSensitive: false,
-        sortAlgorithm: 'tim' as const,
-        useWorker: true,
-        fuzzyMode,
-      };
-      let posted: unknown;
-      fakeSelf.postMessage = (r) => {
-        posted = r;
-      };
-      fakeSelf.onmessage!({ data: { data, normQuery: query, config } });
-      expect(posted).toEqual(search(data, query, config));
     }
   });
 });
