@@ -36,8 +36,8 @@ import { useStableData } from './useStableData';
 export function useExSearch<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[] {
   const stableConfig = useStableConfig(config);
   const stableData = useStableData(data);
-  // One searcher per (data, config): in fuzzyMode 'word' its token cache then
-  // survives query changes instead of re-tokenising every row per keystroke.
+  // One searcher per (data, config): in fuzzyMode 'word' its word index then
+  // survives query changes instead of being rebuilt for every row per keystroke.
   const searcher = useMemo(() => new ExSearch(stableConfig).setData(stableData), [stableData, stableConfig]);
   return useMemo(() => searcher.search(query), [searcher, query]);
 }

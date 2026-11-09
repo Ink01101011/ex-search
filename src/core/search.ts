@@ -226,11 +226,11 @@ export function searchWithRows<T>(
   options?: SearchWithinOptions,
 ): SearchWithRows<T> {
   const rows = toRows(options?.within, data.length);
+  // A blank query returns before the config is validated, as search() always has.
   if (!query.trim()) return NO_HITS();
   return runSearch(data, query, normaliseConfig(config), null, rows);
 }
 
-  // A blank query returns before the config is validated, as search() always has.
 /**
  * Tells whether searching `nextQuery` only within the hits of `prevQuery`
  * (`search(nextQuery, { within: prevHitRows })`) is guaranteed to return

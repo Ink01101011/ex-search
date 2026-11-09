@@ -152,6 +152,8 @@ const r3 = searcher.search('สาขาสยามพารากอม'); // 
 By default the fuzzy tier measures the distance to the **whole** value, so a one-letter typo in one word of `"Somchai Jaidee"` is too far away to match. Opt in to word-level fuzzy matching:
 
 ```typescript
+import { createSearch } from 'ex-search';
+
 const people = createSearch<Person>({
   keys: [{ name: 'fullName', weight: 1.0 }],
   fuzzyMode: 'word',
@@ -164,7 +166,7 @@ people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'S
 
 #### Searching only some rows — `within` and `canNarrow`
 
-Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows.
+Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows. Field values and getters must return the same text every time they are read, because word mode reads each field once more to build its index.
 
 ```typescript
 const subset = searcher.search('name 123', { within: [0, 4, 17] });
@@ -297,7 +299,7 @@ function BranchList({ branches }: { branches: Branch[] }) {
 
 A search that is superseded by a newer query, or whose component unmounts, is **aborted**: its Worker is terminated and nothing is reported. If the async path fails (for example a Worker runtime error) the hook retries with the synchronous search; only when that fails too does it return `results: []` together with a non-null `error`.
 
-**Config stability note** — both hooks compare `config` by **content** (each key's name and weight, plus `threshold`, `fuzzyMaxDistance`, `caseSensitive`, `sortAlgorithm`, `useWorker` and `fuzzyMode`), not by object identity. An inline config such as `useExSearch(data, query, { keys: [...] })` is therefore safe: it does not rebuild the searcher or restart the effect, and the word-mode token cache survives re-renders. Wrapping the config in `useMemo` is optional.
+**Config stability note** — both hooks compare `config` by **content** (each key's name and weight, plus `threshold`, `fuzzyMaxDistance`, `caseSensitive`, `sortAlgorithm`, `useWorker` and `fuzzyMode`), not by object identity. An inline config such as `useExSearch(data, query, { keys: [...] })` is therefore safe: it does not rebuild the searcher or restart the effect, and the word-mode word index survives re-renders. Wrapping the config in `useMemo` is optional.
 
 ### 6. Piping results into ex-flow
 
