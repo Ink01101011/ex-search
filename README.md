@@ -627,6 +627,17 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 | `Comparator<T>`       | `(a: T, b: T) => number`: three-way comparator for the precision searches                  |
 | `ScorerAPI`           | Shape of the exported `Scorer` object                                                      |
 
+## What's new in 2.1.0
+
+All additive; results of existing calls are unchanged.
+
+- **Compact word index** — `fuzzyMode: 'word'` keeps word offsets instead of a string array per value (about 2.8 MB instead of about 90 MB at 100 000 rows × 4 keys). A repeat query does no splitting.
+- **`within`** — `search(query, { within })`, `searchAsync(query, { within })` and `search(data, query, config, { within })` score only the given row indices.
+- **`canNarrow(prevQuery, nextQuery)`** — tells when narrowing to the previous hits is provably exact.
+- **`searchWithRows` / `searchAsyncWithRows`** — the results plus the data index of each one, ready to pass back as `within`.
+
+The same APIs ship on the 1.x line in 1.2.1.
+
 ## Upgrading from 1.x
 
 Behaviour changes in 2.0.0:
