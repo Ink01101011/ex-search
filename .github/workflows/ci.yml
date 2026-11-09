@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   # Formatting is OS-independent; run it once on Linux. On Windows runners
   # core.autocrlf=true would otherwise turn every file into CRLF and Prettier
