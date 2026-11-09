@@ -301,7 +301,8 @@ export class ExSearch<T> {
   private _data: T[] = [];
   // Word index of every (row, key), built on the first search in fuzzyMode
   // 'word' and dropped whenever the data or the config changes.
-  private _words: WordIndex | null = null;
+  // `undefined` = not built yet; `null` = built, but the data is too large to index.
+  private _words: WordIndex | null | undefined = undefined;
 
   constructor(config: SearchConfig<T>) {
     this._config = normaliseConfig(config);
@@ -314,7 +315,7 @@ export class ExSearch<T> {
    */
   setData(data: T[]): this {
     this._data = data;
-    this._words = null;
+    this._words = undefined;
     return this;
   }
 
@@ -329,7 +330,7 @@ export class ExSearch<T> {
       if (config[key] !== undefined) (defined as Record<string, unknown>)[key] = config[key];
     }
     this._config = normaliseConfig({ ...this._config, ...defined });
-    this._words = null;
+    this._words = undefined;
     return this;
   }
 
@@ -368,7 +369,7 @@ export class ExSearch<T> {
   private _wordIndex(): WordIndex | null {
     const cfg = this._config;
     if (cfg.fuzzyMode !== 'word' || !(cfg.fuzzyMaxDistance > 0)) return null;
-    if (this._words === null) {
+    if (this._words === undefined) {
       this._words = kernel.buildWordIndex(
         textGetter(this._data, cfg),
         this._data.length,
