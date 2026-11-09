@@ -6,8 +6,15 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  check:
+  # Formatting is OS-independent; run it once on Linux. On Windows runners
+  # core.autocrlf=true would otherwise turn every file into CRLF and Prettier
+  # (endOfLine "lf" by default) would fail the whole tree.
+  format:
     runs-on: ubuntu-latest
     env:
       CI: true
@@ -23,7 +30,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - name: Install dependencies
@@ -32,7 +39,47 @@ jobs:
       - name: Check formatting
         run: pnpm run format:check
 
+  check:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        # 18 = declared floor (package.json engines ">=18"); 20/22/24 = supported lines.
+        node: [18, 20, 22, 24]
+    env:
+      CI: true
+      HUSKY: 0
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Disable CRLF conversion (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # oxlint 1.6x declares engines ^20.19 || >=22.12, so pnpm skips its native
+      # binding on Node 18. Lint is dev tooling, not the library: run it elsewhere.
       - name: Lint
+        if: matrix.node != 18
         run: pnpm run lint
 
       - name: Typecheck
@@ -43,3 +90,119 @@ jobs:
 
       - name: Build
         run: pnpm run build
+
+      # prepublishOnly publishes the minified build, so the tarball smoke tests
+      # below must run against that output, not the unminified one.
+      - name: Minify (prepublishOnly output)
+        run: pnpm run minify
+
+      # npm 10.8 (bundled with Node 18) still runs the `prepare` script (husky)
+      # despite --ignore-scripts; HUSKY=0 above keeps that a no-op.
+      - name: Pack tarball
+        run: |
+          WORK="$(node -p "require('path').join(require('os').tmpdir(),'ex-search-smoke').split(require('path').sep).join('/')")"
+          rm -rf "$WORK" && mkdir -p "$WORK/pack"
+          npm pack --ignore-scripts --pack-destination "$WORK/pack"
+          echo "SMOKE_WORK=$WORK" >> "$GITHUB_ENV"
+
+      - name: Smoke test packed tarball (require + import every exports subpath)
+        run: |
+          TARBALL="$(ls "$SMOKE_WORK"/pack/*.tgz)"
+          CONSUMER="$SMOKE_WORK/consumer"
+          mkdir -p "$CONSUMER" && cd "$CONSUMER"
+          echo '{ "name": "smoke-consumer", "private": true }' > package.json
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL" exsorted@^1.1.0 ex-flow@^1.0.4 react@^19
+
+          cat > smoke.cjs <<'EOF'
+          const subpaths = ['ex-search', 'ex-search/types', 'ex-search/react'];
+          let fail = 0;
+          for (const s of subpaths) {
+            try {
+              const m = require(s);
+              console.log(`ok   require ${s}: ${Object.keys(m).sort().join(',')}`);
+            } catch (e) {
+              fail++;
+              console.error(`FAIL require ${s}: ${e.code} ${e.message}`);
+            }
+          }
+          const { search, searchWithRows, canNarrow, ExSearch, Scorer } = require('ex-search');
+          const data = [{ n: 'Istanbul' }, { n: 'Ankara' }];
+          const cfg = { keys: [{ name: 'n', weight: 1 }] };
+          const r = search(data, 'ista', cfg);
+          if (r.length !== 1 || r[0].n !== 'Istanbul') { fail++; console.error('FAIL search() result', JSON.stringify(r)); }
+          const w = searchWithRows(data, 'ista', cfg);
+          if (!(w.rows instanceof Uint32Array) || w.rows[0] !== 0) { fail++; console.error('FAIL searchWithRows rows'); }
+          if (typeof canNarrow !== 'function') { fail++; console.error('FAIL canNarrow export'); }
+          if (typeof ExSearch !== 'function' || typeof Scorer !== 'object') { fail++; console.error('FAIL ExSearch/Scorer shape'); }
+          const { useExSearch, useExSearchAsync } = require('ex-search/react');
+          if (typeof useExSearch !== 'function' || typeof useExSearchAsync !== 'function') { fail++; console.error('FAIL react hooks'); }
+          console.log(`require smoke on node ${process.version}: failures=${fail}`);
+          process.exit(fail ? 1 : 0);
+          EOF
+
+          cat > smoke.mjs <<'EOF'
+          const subpaths = ['ex-search', 'ex-search/types', 'ex-search/react'];
+          let fail = 0;
+          for (const s of subpaths) {
+            try {
+              const m = await import(s);
+              console.log(`ok   import ${s}: ${Object.keys(m).sort().join(',')}`);
+            } catch (e) {
+              fail++;
+              console.error(`FAIL import ${s}: ${e.code} ${e.message}`);
+            }
+          }
+          const { ExSearch } = await import('ex-search');
+          const a = new ExSearch({ keys: [{ name: 'n', weight: 1 }], useWorker: true }).setData([{ n: 'Istanbul' }]);
+          const ar = await a.searchAsyncWithRows('ista'); // no global Worker in Node -> sync fallback
+          if (ar.results.length !== 1 || ar.rows[0] !== 0) { fail++; console.error('FAIL searchAsyncWithRows fallback', JSON.stringify(ar)); }
+          console.log(`import smoke on node ${process.version}: failures=${fail}`);
+          process.exit(fail ? 1 : 0);
+          EOF
+
+          node smoke.cjs
+          node smoke.mjs
+
+      # exsorted is a required peer; ex-flow and react stay optional, so the
+      # root and ./types entries must load with only exsorted.
+      - name: Smoke test minimal install (required peer only)
+        run: |
+          TARBALL="$(ls "$SMOKE_WORK"/pack/*.tgz)"
+          BARE="$SMOKE_WORK/bare"
+          mkdir -p "$BARE" && cd "$BARE"
+          echo '{ "name": "smoke-bare", "private": true }' > package.json
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL" exsorted@^1.1.0
+          node -e "require('ex-search'); require('ex-search/types'); console.log('minimal require ok')"
+          node --input-type=module -e "await import('ex-search'); await import('ex-search/types'); console.log('minimal import ok')"
+
+      # ex-flow is an optional peer: the published typings must not import it.
+      # Here only exsorted and react (for ./react types) are installed, with
+      # skipLibCheck off, so a stray `from 'ex-flow'` in any .d.ts fails TS2307.
+      - name: Smoke test published types without ex-flow (skipLibCheck off)
+        run: |
+          TARBALL="$(ls "$SMOKE_WORK"/pack/*.tgz)"
+          NOFLOW="$SMOKE_WORK/noflow"
+          mkdir -p "$NOFLOW" && cd "$NOFLOW"
+          echo '{ "name": "smoke-noflow", "private": true }' > package.json
+          npm install --ignore-scripts --no-audit --no-fund "$TARBALL" exsorted@^1.1.0 react@^19 @types/react@^19
+          if [ -e node_modules/ex-flow ]; then echo "ex-flow must not be installed here"; exit 1; fi
+          # Doc comments may mention ex-flow; only an import/require of it is a defect.
+          if grep -rlE "(from|import|require)[ (]*['\"]ex-flow" node_modules/ex-search/dist --include='*.d.ts' --include='*.d.mts'; then
+            echo "published typings import ex-flow"; exit 1
+          fi
+          cat > types-smoke.mts <<'EOF'
+          import { search, searchWithRows, type SearchResult, type ExFlowResultItem } from 'ex-search';
+          import type { SearchConfig, ExFlowResultItem as TypesItem } from 'ex-search/types';
+          import { useExSearch, useExSearchAsync } from 'ex-search/react';
+          const cfg: SearchConfig<{ n: string }> = { keys: [{ name: 'n', weight: 1 }] };
+          export const r: SearchResult<{ n: string }>[] = search([{ n: 'a' }], 'a', cfg);
+          export const w: Uint32Array = searchWithRows([{ n: 'a' }], 'a', cfg).rows;
+          export const f: ExFlowResultItem<{ n: string }> = { n: 'a', exFlowPriority: 1 };
+          export const t: TypesItem<{ n: string }> = f;
+          export const h = [useExSearch, useExSearchAsync];
+          EOF
+          TSC="$GITHUB_WORKSPACE/node_modules/typescript/bin/tsc"
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.mts
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module preserve --moduleResolution bundler types-smoke.mts
+          cp types-smoke.mts types-smoke.cts
+          node "$TSC" --ignoreConfig --noEmit --strict --skipLibCheck false --module node16 --moduleResolution node16 types-smoke.cts
