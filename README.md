@@ -160,7 +160,35 @@ const people = createSearch<Person>({
 people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'Somchai')
 ```
 
-`ExSearch` tokenises each value once (on the first search after `setData` / `updateConfig`) and reuses the tokens for every keystroke. Call `setData` again if you mutate items in place.
+`ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 2.8 MB for 100 000 rows × 4 keys (400 000 words), against about 90 MB for one string array per value. Call `setData` again if you mutate items in place.
+
+#### Searching only some rows — `within` and `canNarrow`
+
+Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows.
+
+```typescript
+const subset = searcher.search('name 123', { within: [0, 4, 17] });
+```
+
+Narrowing to the previous query's hits while the user types is **not** always exact: with fuzzy matching on, `'name 123'` can match a row `'name 12'` missed. `canNarrow(prevQuery, nextQuery)` returns `true` only when it is provably exact for the current config:
+
+- both queries are the same after case folding (any config; 1.x does not trim queries), or
+- `fuzzyMaxDistance: 0`, every key weight is a finite number ≥ 0, the previous query is a substring of the next one (typing at the end or start), and no key weight lets a row pass `threshold` on the next query while failing it on the previous one (an exact hit on the next query is only a starts-with or contains hit on the previous one).
+
+```typescript
+let prev = '';
+let prevRows: number[] = [];
+
+function onType(query: string) {
+  const options = searcher.canNarrow(prev, query) ? { within: prevRows } : undefined;
+  const results = searcher.search(query, options);
+  prev = query;
+  prevRows = results.map((r) => rowIndexById.get(r.id)!); // your own id → row index map
+  return results;
+}
+```
+
+The standalone form is `canNarrow(prevQuery, nextQuery, config)`.
 
 ### 3. Async search with Web Worker (large datasets, browser only)
 
@@ -294,10 +322,20 @@ const plan = flow.resolveExecutionPlan();
 One-shot search over an array. Scores every item, filters by `threshold`, and returns results sorted by score descending.
 
 ```typescript
-function search<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[];
+function search<T>(data: T[], query: string, config: SearchConfig<T>, options?: SearchWithinOptions): SearchResult<T>[];
 ```
 
-Returns an empty array when `query` is an empty string or whitespace only.
+Returns an empty array when `query` is an empty string or whitespace only. `options.within` limits scoring to those row indices (see [Searching only some rows](#searching-only-some-rows--within-and-cannarrow)).
+
+---
+
+### `canNarrow<T>(prevQuery, nextQuery, config)`
+
+`true` only when `search(nextQuery, { within: <row indices of the prevQuery hits> })` provably equals a full search for `nextQuery` under `config`. Always `false` with fuzzy matching on (unless the two queries are equal after case folding) and for a blank query.
+
+```typescript
+function canNarrow<T>(prevQuery: string, nextQuery: string, config: SearchConfig<T>): boolean;
+```
 
 ---
 
@@ -322,8 +360,9 @@ class ExSearch<T> {
   setData(data: T[]): this;
   updateConfig(config: Partial<SearchConfig<T>>): this;
 
-  search(query: string): SearchResult<T>[];
-  searchAsync(query: string): Promise<SearchResult<T>[]>;
+  search(query: string, options?: SearchWithinOptions): SearchResult<T>[];
+  searchAsync(query: string, options?: SearchWithinOptions): Promise<SearchResult<T>[]>;
+  canNarrow(prevQuery: string, nextQuery: string): boolean;
 }
 ```
 
@@ -331,9 +370,11 @@ class ExSearch<T> {
 
 **`updateConfig(partial)`** — Merge a partial config update. All fields are optional; unspecified fields keep their previous value. Returns `this` for chaining.
 
-**`search(query)`** — Synchronous. Suitable for datasets up to ~50 000 records in browser environments or any size in Node.js.
+**`search(query, options?)`** — Synchronous. Suitable for datasets up to ~50 000 records in browser environments or any size in Node.js. `options.within` scores only those row indices; indices that are not an integer row of the data are ignored and duplicates count once.
 
-**`searchAsync(query)`** — When `useWorker: true` and the environment supports `Worker`, scoring runs in a dedicated Worker thread. Falls back to synchronous execution otherwise.
+**`searchAsync(query, options?)`** — When `useWorker: true` and the environment supports `Worker`, scoring runs in a dedicated Worker thread. Falls back to synchronous execution otherwise. `options.within` works as in `search()` (only those rows are posted).
+
+**`canNarrow(prevQuery, nextQuery)`** — `canNarrow` for this instance's current config.
 
 ---
 
@@ -492,15 +533,16 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 
 ## Types Reference
 
-| Type              | Description                                                                              |
-| ----------------- | ---------------------------------------------------------------------------------------- |
-| `SearchConfig<T>` | Configuration passed to `search()`, `createSearch()`, or `ExSearch` constructor          |
-| `SearchKey<T>`    | A single `{ name: keyof T, weight: number }` entry inside `SearchConfig.keys`            |
-| `SearchResult<T>` | An item from the input array enriched with `score`, `exFlowPriority`, and `fieldMatches` |
-| `FieldMatch`      | Per-field scoring breakdown inside `SearchResult.fieldMatches`                           |
-| `MatchType`       | `'exact' \| 'startsWith' \| 'contains' \| 'fuzzy' \| 'none'`                             |
-| `SortAlgorithm`   | `'radix' \| 'tim'`                                                                       |
-| `ScorerAPI`       | Shape of the exported `Scorer` object                                                    |
+| Type                  | Description                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| `SearchConfig<T>`     | Configuration passed to `search()`, `createSearch()`, or `ExSearch` constructor          |
+| `SearchKey<T>`        | A single `{ name: keyof T, weight: number }` entry inside `SearchConfig.keys`            |
+| `SearchResult<T>`     | An item from the input array enriched with `score`, `exFlowPriority`, and `fieldMatches` |
+| `FieldMatch`          | Per-field scoring breakdown inside `SearchResult.fieldMatches`                           |
+| `MatchType`           | `'exact' \| 'startsWith' \| 'contains' \| 'fuzzy' \| 'none'`                             |
+| `SortAlgorithm`       | `'radix' \| 'tim'`                                                                       |
+| `SearchWithinOptions` | `{ within?: ArrayLike<number> }`: per-call options for `search` / `searchAsync`          |
+| `ScorerAPI`           | Shape of the exported `Scorer` object                                                    |
 
 ## Peer Dependencies
 
