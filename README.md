@@ -166,7 +166,7 @@ people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'S
 
 #### Searching only some rows — `within` and `canNarrow`
 
-Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows. Field values and getters must return the same text every time they are read, because word mode reads each field once more to build its index.
+Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows. Field values and getters must return the same text every time they are read, because word mode reads each field once more to build its index. `within` must be an array-like whose `length` is a number from 0 to 2³²−1; anything else throws a `TypeError`.
 
 ```typescript
 const subset = searcher.search('name 123', { within: [0, 4, 17] });
