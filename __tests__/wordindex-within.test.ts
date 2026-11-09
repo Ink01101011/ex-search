@@ -2,6 +2,7 @@ import { canNarrow, createSearch, ExSearch, search, searchWithRows } from '../sr
 import { createKernel } from '../src/core/kernel';
 import type { SearchConfig, SearchResult } from '../src/types';
 import { FakeWorker, installFakeWorker } from './helpers/fakeWorker';
+import { tokenize } from './helpers/tokenize';
 
 // ---------------------------------------------------------------------------
 // Seeded random data
@@ -104,7 +105,7 @@ function referenceScore(text: string, q: string, max: number, word: boolean): nu
   };
   score = fz(text);
   if (word) {
-    const tokens = ref.tokenize(text);
+    const tokens = tokenize(text);
     const start = tokens.length === 1 && tokens[0] === text ? 1 : 0;
     for (let i = start; i < tokens.length; i++) score = Math.max(score, fz(tokens[i]));
   }
@@ -144,7 +145,7 @@ describe('word index (fuzzyMode word)', () => {
       const n = k.wordSpans(text, spans);
       const words: string[] = [];
       for (let w = 0; w < n; w++) words.push(text.slice(spans[2 * w], spans[2 * w + 1]));
-      const tokens = k.tokenize(text);
+      const tokens = tokenize(text);
       const expected = tokens.length === 1 && tokens[0] === text ? [] : tokens;
       expect(words).toEqual(expected);
     }
