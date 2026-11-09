@@ -7,7 +7,7 @@
 [![Bundle size](https://img.shields.io/bundlephobia/minzip/ex-search)](https://bundlephobia.com/package/ex-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` with a four-tier match pipeline — exact, starts-with, contains, and fuzzy — weighted per field and ranked using `radixSort` or `timSort` from [exsorted](https://www.npmjs.com/package/exsorted). Results carry an `exFlowPriority` field so they plug directly into [ex-flow](https://www.npmjs.com/package/ex-flow) pipelines.
+Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` with a four-tier match pipeline — exact, starts-with, contains, and fuzzy — weighted per field and ranked using `radixSort` or `timSort` from [exsorted](https://www.npmjs.com/package/exsorted). Results carry an `exFlowPriority` field that is a ready-made `priority` value for [ex-flow](https://www.npmjs.com/package/ex-flow) pipelines (see [Piping results into ex-flow](#6-piping-results-into-ex-flow)).
 
 ## Features
 
@@ -18,7 +18,7 @@ Scoring-based fuzzy search for TypeScript. Replaces naive `String.includes()` wi
 - **Pluggable sort backend** — choose `radixSort` (O(n), best for large result sets) or `timSort` (O(n log n) stable)
 - **Web Worker support** — offload scoring to a Worker thread in browser environments to keep the UI responsive
 - **React hooks** — `useExSearch` (sync, SSR-safe) and `useExSearchAsync` (Worker-backed) via `ex-search/react`
-- **ex-flow compatible** — every result includes `exFlowPriority` mirroring the normalized score
+- **ex-flow ready** — every result includes `exFlowPriority` (the normalized score ×100), ready to use as an ex-flow node `priority`
 - **Fully typed** — complete TypeScript generics; no `any` in public API
 - **Dual module support** — ships as both ESM and CommonJS
 - **Tree-shakeable** — import only `Scorer` utilities or the React hooks subpath independently
@@ -79,10 +79,10 @@ pnpm add ex-search
 npm install ex-search
 ```
 
-`ex-search` requires `exsorted` and `ex-flow` as peer dependencies:
+`ex-search` requires `exsorted` as a peer dependency (the root and `ex-search/react` entries import it when they load). `react` and `ex-flow` are optional peers: install `react` only for `ex-search/react`, and `ex-flow` only if you pipe results into it.
 
 ```bash
-pnpm add exsorted ex-flow
+pnpm add exsorted
 ```
 
 ## Quick Start
@@ -152,6 +152,8 @@ const r3 = searcher.search('Chiengmai'); // fuzzy → matches 'เชียง�
 By default the fuzzy tier measures the distance to the **whole** value, so a one-letter typo in one word of `"Somchai Jaidee"` is too far away to match. Opt in to word-level fuzzy matching:
 
 ```typescript
+import { createSearch } from 'ex-search';
+
 const people = createSearch<Person>({
   keys: [{ name: 'fullName', weight: 1.0 }],
   fuzzyMode: 'word',
@@ -164,7 +166,7 @@ people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'S
 
 #### Searching only some rows — `within` and `canNarrow`
 
-Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows.
+Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows. Field values and getters must return the same text every time they are read, because word mode reads each field once more to build its index. `within` must be an array-like whose `length` is a number from 0 to 2³²−1; anything else throws a `TypeError`.
 
 ```typescript
 const subset = searcher.search('name 123', { within: [0, 4, 17] });
@@ -229,7 +231,7 @@ Install `react` as a peer dependency (already required if you are in a React pro
 #### `useExSearch` — synchronous, SSR-safe
 
 ```typescript
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useExSearch } from 'ex-search/react';
 
 function BranchList({ branches }: { branches: Branch[] }) {
@@ -263,6 +265,7 @@ function BranchList({ branches }: { branches: Branch[] }) {
 #### `useExSearchAsync` — Worker-backed, large datasets
 
 ```typescript
+import { useMemo, useState } from 'react';
 import { useExSearchAsync } from 'ex-search/react';
 
 function BranchList({ branches }: { branches: Branch[] }) {
@@ -295,27 +298,23 @@ function BranchList({ branches }: { branches: Branch[] }) {
 
 ### 6. Piping results into ex-flow
 
-Every `SearchResult<T>` carries `exFlowPriority = Math.round(score × 100)`, which is the field `ex-flow` reads for priority ordering. No transformation is needed.
+Every `SearchResult<T>` carries `exFlowPriority = Math.round(score × 100)`. That number is a ready-made ex-flow `priority`, but ex-flow **reserves** the `exFlowPriority` field inside a node's `data` (`addEntity` throws `EXFLOW_RESERVED_FIELD` if it is present). So a result cannot be passed as `data` as-is: lift `exFlowPriority` out into the node's `priority` and keep the rest as `data`.
 
 ```typescript
 import { search } from 'ex-search';
 import { ExFlow } from 'ex-flow';
 
-const searchResults = search(branches, 'สยาม', config);
+const results = search(branches, 'สยาม', config);
 
 const flow = new ExFlow<Branch>({ priorityAscending: false });
-
-searchResults.forEach((result) => {
-  flow.addEntity({
-    id: result.id,
-    data: result,
-    dependsOn: [],
-    // exFlowPriority is already set by ex-search — no manual mapping required
-  });
-});
-
+for (const { exFlowPriority, score, fieldMatches, ...branch } of results) {
+  flow.addEntity({ id: branch.id, data: branch, dependsOn: [], priority: exFlowPriority });
+}
 const plan = flow.resolveExecutionPlan();
+// plan.fullSequence is ordered by score, highest first
 ```
+
+`priorityAscending: false` makes higher priorities run first, which matches ranking order. This exact example is covered by `__tests__/exflow.test.ts`.
 
 ## API Reference
 
@@ -568,13 +567,13 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 
 ## Peer Dependencies
 
-| Package    | Version                | Required for            |
-| ---------- | ---------------------- | ----------------------- |
-| `exsorted` | `^1.1.0`               | Core search and sorting |
-| `ex-flow`  | `^1.0.4`               | `exFlowPriority` field  |
-| `react`    | `^18.2.0` or `^19.0.0` | `ex-search/react` hooks |
+| Package    | Version                | Required for                                    |
+| ---------- | ---------------------- | ----------------------------------------------- |
+| `exsorted` | `^1.1.0`               | Core search and sorting (required)              |
+| `ex-flow`  | `^1.0.4`               | Optional: only when piping results into ex-flow |
+| `react`    | `^18.2.0` or `^19.0.0` | Optional: `ex-search/react` hooks               |
 
-All peer dependencies are optional — install only what you use. They are not bundled into `ex-search`.
+`exsorted` is a **required** peer dependency; `ex-flow` and `react` are optional. None of them is bundled into `ex-search`. `ex-search/types` loads without any peer installed.
 
 ## Compatibility
 

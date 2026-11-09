@@ -66,9 +66,12 @@ Scorer.exact('สยาม', 'สยาม'); // → 100
 Scorer.startsWith('สยามพารากอน', 'สยาม'); // → 80
 Scorer.fuzzy('Chiangmai', 'Chiengmai'); // → ~57  (dist=2, maxLen=9 → (1-2/9)×70)
 
-// ── 5. Pipe into ex-flow (exFlowPriority is already set on each result) ───
+// ── 5. Pipe into ex-flow (lift exFlowPriority into the node's priority) ───
+// ex-flow reserves `exFlowPriority` in node data, so results cannot be passed as `data` as-is.
 
 // import { ExFlow } from 'ex-flow';
 // const flow = new ExFlow<Branch>({ priorityAscending: false });
-// r1.forEach((result) => flow.addEntity({ id: result.id, data: result, dependsOn: [] }));
+// for (const { exFlowPriority, score, fieldMatches, ...branch } of r1) {
+//   flow.addEntity({ id: branch.id, data: branch, dependsOn: [], priority: exFlowPriority });
+// }
 // const plan = flow.resolveExecutionPlan();

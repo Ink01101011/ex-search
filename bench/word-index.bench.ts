@@ -50,6 +50,7 @@ const repeats = typed.map((q) => time(() => s.search(q)));
 // Index size, measured directly from its typed arrays.
 const k = createKernel();
 const idx = k.buildWordIndex(data, keys, false);
+if (idx === null) throw new Error('word index not built');
 const bytes = idx.cells.byteLength + idx.starts.byteLength + idx.spans.byteLength;
 
 // The previous cache: one string[] per (row, key).
@@ -58,7 +59,7 @@ let stringCacheMB = 'n/a (run node with --expose-gc)';
 if (g.gc) {
   g.gc();
   const before = process.memoryUsage().heapUsed;
-  const cache = data.flatMap((row) => keys.map((key) => k.tokenize(row[key.name].toLowerCase())));
+  const cache = data.flatMap((row) => keys.map((key) => row[key.name].toLowerCase().split(/\s+/).filter(Boolean)));
   g.gc();
   stringCacheMB = ((process.memoryUsage().heapUsed - before) / 1e6).toFixed(1) + ' MB';
   void cache.length;

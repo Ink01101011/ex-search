@@ -60,36 +60,40 @@ const NO_HITS = <T>(): SearchWithRows<T> => ({ results: [], rows: new Uint32Arra
 /**
  * Normalises a `within` subset to ascending, unique, in-range row indices.
  * Entries that are not an integer row index of `data` are ignored. Returns
- * `null` when no subset was given (score every row).
+ * `null` when no subset was given (score every row). Throws a `TypeError` when
+ * `length` is not a number in `[0, 2^32 - 1]`. `length` is read once and every
+ * element at most once.
  */
 function toRows(within: ArrayLike<number> | null | undefined, nRows: number): Uint32Array | null {
   if (within == null) return null;
+  // `length` is read once; every element is read exactly once, validated and
+  // copied in the same pass, so a getter or Proxy cannot change what is used.
   const n = within.length;
-  if (typeof n !== 'number' || !(n >= 0)) {
+  if (typeof n !== 'number' || !(n >= 0) || n > 0xffffffff) {
     throw new TypeError('ex-search: options.within must be an array or typed array of row indices');
   }
+  let out = new Uint32Array(n < 1024 ? n : 1024);
+  let m = 0;
   let ordered = true;
   let prev = -1;
   for (let i = 0; i < n; i++) {
     const r = within[i];
-    if (!(Number.isInteger(r) && r > prev && r < nRows)) {
-      ordered = false;
-      break;
+    if (!(Number.isInteger(r) && r >= 0 && r < nRows)) continue;
+    if (m === out.length) {
+      const bigger = new Uint32Array(m * 2);
+      bigger.set(out);
+      out = bigger;
     }
+    if (r <= prev) ordered = false;
     prev = r;
+    out[m++] = r;
   }
-  if (ordered) return Uint32Array.from(within);
+  if (ordered) return out.subarray(0, m);
 
-  const valid: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const r = within[i];
-    if (Number.isInteger(r) && r >= 0 && r < nRows) valid.push(r);
-  }
-  valid.sort((a, b) => a - b);
-  const out = new Uint32Array(valid.length);
-  let m = 0;
-  for (let i = 0; i < valid.length; i++) if (m === 0 || out[m - 1] !== valid[i]) out[m++] = valid[i];
-  return out.subarray(0, m);
+  const sorted = out.subarray(0, m).sort();
+  let u = 0;
+  for (let i = 0; i < m; i++) if (u === 0 || sorted[u - 1] !== sorted[i]) sorted[u++] = sorted[i];
+  return sorted.subarray(0, u);
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +253,8 @@ export class ExSearch<T> {
   private _data: T[] = [];
   // Word index of every (row, key), built on the first search in fuzzyMode
   // 'word' and dropped whenever the data or the config changes.
-  private _words: WordIndex | null = null;
+  // `undefined` = not built yet; `null` = built, but the data is too large to index.
+  private _words: WordIndex | null | undefined = undefined;
 
   constructor(config: SearchConfig<T>) {
     this._config = normaliseConfig(config);
@@ -262,7 +267,7 @@ export class ExSearch<T> {
    */
   setData(data: T[]): this {
     this._data = data;
-    this._words = null;
+    this._words = undefined;
     return this;
   }
 
@@ -272,7 +277,7 @@ export class ExSearch<T> {
    */
   updateConfig(config: Partial<SearchConfig<T>>): this {
     this._config = normaliseConfig({ ...this._config, ...config });
-    this._words = null;
+    this._words = undefined;
     return this;
   }
 
@@ -313,7 +318,7 @@ export class ExSearch<T> {
   private _wordIndex(): WordIndex | null {
     const cfg = this._config;
     if (cfg.fuzzyMode !== 'word') return null;
-    if (this._words === null) {
+    if (this._words === undefined) {
       this._words = kernel.buildWordIndex(this._data, cfg.keys as KernelConfig['keys'], cfg.caseSensitive);
     }
     return this._words;
@@ -398,9 +403,12 @@ function runInWorker<T, R>(data: T[], query: string, config: Required<SearchConf
 /**
  * Inlined worker source.
  * Self-contained copy of the scoring logic with no module imports so it
- * runs in an isolated Worker context without a bundler.
+ * runs in an isolated Worker context without a bundler. The `__name` shim
+ * keeps it working when a toolchain (esbuild `keepNames`, tsx) injects that
+ * helper into the serialised functions.
  */
 const WORKER_SOURCE = `
+var __name = function (f) { return f; };
 (${workerEntry.toString()})(${createKernel.toString()});
 `;
 

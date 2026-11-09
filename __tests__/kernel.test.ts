@@ -256,4 +256,34 @@ describe('Worker source', () => {
       expect(posted).toEqual(search(data, query, config));
     }
   });
+
+  // esbuild `keepNames` (tsx uses it) wraps serialised functions in __name(fn, "name"); the
+  // helper is defined once at the top of the consumer's bundle, not inside the Worker source.
+  (covered ? it.skip : it)('defines the __name helper that esbuild keepNames / tsx inject', () => {
+    expect(__WORKER_SOURCE__.trimStart().startsWith('var __name')).toBe(true);
+    const injected = __WORKER_SOURCE__
+      .replace('function createKernel() {', 'function createKernel() {\n__name(function probe() {}, "probe");')
+      .replace('self.onmessage = function', '__name(function probe2() {}, "probe2"); self.onmessage = function');
+    expect(injected).not.toBe(__WORKER_SOURCE__);
+
+    const data = [{ id: 1, name: 'Somchai Jaidee' }];
+    const config = {
+      keys: [{ name: 'name' as const, weight: 1 }],
+      threshold: 0.3,
+      fuzzyMaxDistance: 3,
+      caseSensitive: false,
+      sortAlgorithm: 'tim' as const,
+      useWorker: true,
+      fuzzyMode: 'word' as const,
+    };
+    let posted: unknown;
+    const fakeSelf: { onmessage?: (e: { data: unknown }) => void; postMessage: (r: unknown) => void } = {
+      postMessage: (r) => {
+        posted = r;
+      },
+    };
+    new Function('self', injected)(fakeSelf);
+    fakeSelf.onmessage!({ data: { data, normQuery: 'somchay', config } });
+    expect(posted).toEqual(search(data, 'somchay', config));
+  });
 });

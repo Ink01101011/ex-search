@@ -120,14 +120,16 @@ export interface SearchWithRows<T> {
 
 /**
  * A single search result.
- * Mirrors the shape of ExFlowResultItem so results can be fed directly into
- * ex-flow pipelines; exFlowPriority = Math.round(score * 100).
+ * Mirrors the shape of ExFlowResultItem; exFlowPriority = Math.round(score * 100).
+ * ex-flow reserves `exFlowPriority` in node data, so results are not passed to
+ * `addEntity` as-is: lift `exFlowPriority` out into the node's `priority` and
+ * keep the rest as `data` (see the README section "Piping results into ex-flow").
  *
  * We use a type alias (not interface extends) to avoid propagating ex-flow's
  * `ExFlowSafeData` constraint onto every generic in this library.
  */
 export type SearchResult<T> = Omit<T, 'exFlowPriority'> & {
-  /** exFlowPriority mirrors score so the result plugs into ex-flow as-is */
+  /** Ready-made ex-flow `priority` value (Math.round(score * 100)); lift it out of `data` before addEntity */
   exFlowPriority: number;
   /**
    * Normalized relevance score in the range 0.0 – 1.0.
@@ -178,4 +180,9 @@ export interface ScorerAPI {
 // Re-exports
 // ---------------------------------------------------------------------------
 
-export type { ExFlowResultItem } from 'ex-flow';
+/**
+ * Structural equivalent of ex-flow's `ExFlowResultItem` (same shape, looser
+ * constraint). Declared inline so the published typings never import `ex-flow`,
+ * which is an optional peer.
+ */
+export type ExFlowResultItem<T extends object> = Omit<T, 'exFlowPriority'> & { exFlowPriority: number };

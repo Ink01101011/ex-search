@@ -1,5 +1,6 @@
 import { canNarrow, createSearch, ExSearch, search, searchWithRows, __WORKER_SOURCE__ } from '../src/core/search';
 import { createKernel } from '../src/core/kernel';
+import { tokenize } from './helpers/tokenize';
 import type { SearchConfig, SearchResult } from '../src/types';
 
 // ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ function referenceScore(text: string, q: string, max: number, word: boolean): nu
   };
   score = fz(text);
   if (word) {
-    const tokens = ref.tokenize(text);
+    const tokens = tokenize(text);
     const start = tokens.length === 1 && tokens[0] === text ? 1 : 0;
     for (let i = start; i < tokens.length; i++) score = Math.max(score, fz(tokens[i]));
   }
@@ -142,7 +143,7 @@ describe('word index (fuzzyMode word)', () => {
       const n = k.wordSpans(text, spans);
       const words: string[] = [];
       for (let w = 0; w < n; w++) words.push(text.slice(spans[2 * w], spans[2 * w + 1]));
-      const tokens = k.tokenize(text);
+      const tokens = tokenize(text);
       const expected = tokens.length === 1 && tokens[0] === text ? [] : tokens;
       expect(words).toEqual(expected);
     }
@@ -194,7 +195,7 @@ describe('word index (fuzzyMode word)', () => {
   it('uses 32-bit offsets when a value is longer than 65 535 code units', () => {
     const k = createKernel();
     const long = 'a'.repeat(70000) + ' somchai';
-    const idx = k.buildWordIndex([{ n: long }, { n: 'x y' }], [{ name: 'n', weight: 1 }], false);
+    const idx = k.buildWordIndex([{ n: long }, { n: 'x y' }], [{ name: 'n', weight: 1 }], false)!;
     expect(idx.spans).toBeInstanceOf(Uint32Array);
     const data = [{ name: long }, { name: 'x y' }];
     const s = createSearch({ keys: [{ name: 'name', weight: 1 }], fuzzyMode: 'word' }).setData(data);
@@ -217,7 +218,7 @@ describe('word index (fuzzyMode word)', () => {
         { name: 'q', weight: 1 },
       ],
       false,
-    );
+    )!;
     expect(idx.spans).toBeInstanceOf(Uint16Array);
     expect(Array.from(idx.cells)).toEqual([1, 2]);
     expect(Array.from(idx.starts)).toEqual([0, 2, 3]);
