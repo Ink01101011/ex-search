@@ -11,7 +11,11 @@ describe('word index on very large datasets', () => {
   it('buildWordIndex returns null when the cell id cannot fit in 32 bits', () => {
     const k = createKernel();
     const keys = (n: number) => Array.from({ length: n }, (_, i) => ({ name: `k${i}`, weight: 1 }));
-    const sparse = (n: number) => new Array<Row>(n);
+    const sparse = (n: number) => {
+      const holes: Row[] = [];
+      holes.length = n;
+      return holes;
+    };
     expect(k.buildWordIndex(sparse(2 ** 21), keys(2 ** 11), false)).toBeNull();
     expect(k.buildWordIndex(sparse(2 ** 21), keys(2 ** 11 - 1), false)).not.toBeNull();
   });

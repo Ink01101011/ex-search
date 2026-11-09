@@ -59,7 +59,7 @@ let stringCacheMB = 'n/a (run node with --expose-gc)';
 if (g.gc) {
   g.gc();
   const before = process.memoryUsage().heapUsed;
-  const cache = data.flatMap((row) => keys.map((key) => k.tokenize(row[key.name].toLowerCase())));
+  const cache = data.flatMap((row) => keys.map((key) => row[key.name].toLowerCase().split(/\s+/).filter(Boolean)));
   g.gc();
   stringCacheMB = ((process.memoryUsage().heapUsed - before) / 1e6).toFixed(1) + ' MB';
   void cache.length;

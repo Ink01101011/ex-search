@@ -205,14 +205,6 @@ export function createKernel() {
     };
   }
 
-  /** Splits a value into whitespace-separated words. */
-  function tokenize(text: string): string[] {
-    const out: string[] = [];
-    const parts = text.split(/\s+/);
-    for (let i = 0; i < parts.length; i++) if (parts[i]) out.push(parts[i]);
-    return out;
-  }
-
   /** Whether a UTF-16 code unit is `\s`: the WhiteSpace and LineTerminator characters of ECMAScript. */
   function isSpace(c: number): boolean {
     if (c > 32 && c < 0xa0) return false;
@@ -465,7 +457,7 @@ export function createKernel() {
     return results;
   }
 
-  return { levenshtein, boundedDistance, createMatcher, tokenize, wordSpans, buildWordIndex, scoreRows };
+  return { levenshtein, boundedDistance, createMatcher, wordSpans, buildWordIndex, scoreRows };
 }
 
 export type Kernel = ReturnType<typeof createKernel>;
