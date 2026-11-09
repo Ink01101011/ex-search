@@ -1,6 +1,6 @@
 import { radixSort, timSort } from 'exsorted';
-import type { SearchConfig, SearchResult, SearchOptions } from '../types';
-import { createKernel, type KernelConfig, type KernelHit, type TokenSource } from './kernel';
+import type { SearchConfig, SearchResult, SearchOptions, SearchWithinOptions } from '../types';
+import { createKernel, type KernelConfig, type KernelHit, type WordIndex } from './kernel';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -11,9 +11,6 @@ const SCORE_PRECISION = 1_000_000;
 const MAX_KEY = Number.MAX_SAFE_INTEGER;
 
 const kernel = createKernel();
-
-/** Tokenises on demand, without caching — used by the one-shot functional API. */
-const tokenizeLive: TokenSource = (_row, _key, text) => kernel.tokenize(text);
 
 function radixKey(score: number): number {
   const key = Math.round((1 - score) * SCORE_PRECISION);
@@ -50,25 +47,67 @@ function normalise(query: string, caseSensitive: boolean): string {
   return caseSensitive ? q : q.toLowerCase();
 }
 
+type TextGetter = (row: number, key: number) => string | null | undefined;
+
+function textGetter<T>(data: T[], cfg: Required<SearchConfig<T>>): TextGetter {
+  const names = cfg.keys.map((k) => k.name as string | number | symbol);
+  return (row, key) => {
+    const item = data[row] as Record<string | number | symbol, unknown> | null | undefined;
+    return item == null ? undefined : kernel.toText(item[names[key]]);
+  };
+}
+
 function runSearch<T>(
   data: T[],
   query: string,
   cfg: Required<SearchConfig<T>>,
-  tokensFor: TokenSource | null,
+  words: WordIndex | null,
+  rows: Uint32Array | null,
 ): SearchResult<T>[] {
-  const names = cfg.keys.map((k) => k.name as string | number | symbol);
-  const getText = (row: number, key: number): string | null | undefined => {
-    const item = data[row] as Record<string | number | symbol, unknown> | null | undefined;
-    return item == null ? undefined : kernel.toText(item[names[key]]);
-  };
   const hits = kernel.scoreRows(
-    getText,
+    textGetter(data, cfg),
     data.length,
     normalise(query, cfg.caseSensitive),
     toKernelConfig(cfg),
-    tokensFor,
+    words,
+    rows,
   );
   return buildResults(data, hits, cfg.sortAlgorithm);
+}
+
+/**
+ * Normalises a `within` subset to ascending, unique, in-range row indices.
+ * Entries that are not an integer row index of `data` are ignored. Returns
+ * `null` when no subset was given (score every row).
+ */
+function toRows(within: ArrayLike<number> | null | undefined, nRows: number): Uint32Array | null {
+  if (within == null) return null;
+  const n = within.length;
+  if (typeof n !== 'number' || !(n >= 0)) {
+    throw new TypeError('ex-search: options.within must be an array or typed array of row indices');
+  }
+  let ordered = true;
+  let prev = -1;
+  for (let i = 0; i < n; i++) {
+    const r = within[i];
+    if (!(Number.isInteger(r) && r > prev && r < nRows)) {
+      ordered = false;
+      break;
+    }
+    prev = r;
+  }
+  if (ordered) return Uint32Array.from(within);
+
+  const valid: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const r = within[i];
+    if (Number.isInteger(r) && r >= 0 && r < nRows) valid.push(r);
+  }
+  valid.sort((a, b) => a - b);
+  const out = new Uint32Array(valid.length);
+  let m = 0;
+  for (let i = 0; i < valid.length; i++) if (m === 0 || out[m - 1] !== valid[i]) out[m++] = valid[i];
+  return out.subarray(0, m);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +184,7 @@ function normaliseConfig<T>(config: SearchConfig<T>): Required<SearchConfig<T>> 
  * @param data - Array of items to search.
  * @param query - The search string typed by the user.
  * @param config - Field weights, threshold, fuzzy distance, and sort algorithm.
+ * @param options - `within`: score only these row indices (see `SearchWithinOptions`).
  *
  * @example
  * const results = search(branches, 'สยาม', {
@@ -152,11 +192,63 @@ function normaliseConfig<T>(config: SearchConfig<T>): Required<SearchConfig<T>> 
  *   threshold: 0.3,
  * });
  */
-export function search<T>(data: T[], query: string, config: SearchConfig<T>): SearchResult<T>[] {
-  if (!query.trim()) return [];
-
+export function search<T>(
+  data: T[],
+  query: string,
+  config: SearchConfig<T>,
+  options?: SearchWithinOptions,
+): SearchResult<T>[] {
   const cfg = normaliseConfig(config);
-  return runSearch(data, query, cfg, cfg.fuzzyMode === 'word' ? tokenizeLive : null);
+  const rows = toRows(options?.within, data.length);
+  if (!query.trim()) return [];
+  return runSearch(data, query, cfg, null, rows);
+}
+
+/**
+ * Tells whether searching `nextQuery` only within the hits of `prevQuery`
+ * (`search(nextQuery, { within: prevHitRows })`) is guaranteed to return
+ * exactly what a full search for `nextQuery` returns, under `config`.
+ *
+ * Returns `true` only when that is provable:
+ * - both queries normalise (trim, case) to the same string, for any config; or
+ * - the fuzzy tier is off (`fuzzyMaxDistance: 0`), the normalised `prevQuery`
+ *   is a substring of the normalised `nextQuery`, and no key's weight lets a
+ *   row pass `threshold` on `nextQuery` while failing it on `prevQuery`
+ *   (a field that matches `nextQuery` exactly / at its start / anywhere scores
+ *   at least the starts-with (80) or contains (65) tier on `prevQuery`).
+ *
+ * With fuzzy matching on, a longer query can match rows the shorter one
+ * missed, so the answer is `false`. A blank query on either side also gives
+ * `false`.
+ */
+export function canNarrow<T>(prevQuery: string, nextQuery: string, config: SearchConfig<T>): boolean {
+  return narrowable(prevQuery, nextQuery, normaliseConfig(config));
+}
+
+function narrowable<T>(prevQuery: string, nextQuery: string, cfg: Required<SearchConfig<T>>): boolean {
+  const p = normalise(prevQuery, cfg.caseSensitive);
+  const n = normalise(nextQuery, cfg.caseSensitive);
+  if (p === '' || n === '') return false;
+  if (p === n) return true;
+  if (cfg.fuzzyMaxDistance > 0) return false;
+
+  // Lowest raw score a field can get on `p` when it matches `n` at all.
+  const floor = n.startsWith(p) ? 80 : n.includes(p) ? 65 : -1;
+  if (floor < 0) return false;
+
+  // A field scoring S on `n` scores at least min(S, floor) on `p` (S = 0 for
+  // no match). Same arithmetic as the kernel: fieldScore = raw × weight, then
+  // the row passes when max(fieldScore) / 100 >= threshold.
+  const t = cfg.threshold;
+  for (const key of cfg.keys) {
+    const w = key.weight;
+    for (const tier of [100, 80, 65, 0]) {
+      const passesNext = !((tier * w) / 100 < t);
+      const passesPrev = !(((tier < floor ? tier : floor) * w) / 100 < t);
+      if (passesNext && !passesPrev) return false;
+    }
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -180,9 +272,9 @@ export function search<T>(data: T[], query: string, config: SearchConfig<T>): Se
 export class ExSearch<T> {
   private _config: Required<SearchConfig<T>>;
   private _data: T[] = [];
-  // Word tokens per (row, key), filled once on first use in fuzzyMode 'word'
-  // and dropped whenever the data or the config changes.
-  private _tokens: (string[] | undefined)[] | null = null;
+  // Word index of every (row, key), built on the first search in fuzzyMode
+  // 'word' and dropped whenever the data or the config changes.
+  private _words: WordIndex | null = null;
 
   constructor(config: SearchConfig<T>) {
     this._config = normaliseConfig(config);
@@ -190,12 +282,12 @@ export class ExSearch<T> {
 
   /**
    * Replace the entire dataset. Returns `this` for chaining.
-   * In `fuzzyMode: 'word'` each value is tokenised once and cached, so call
-   * `setData` again after mutating items in place.
+   * In `fuzzyMode: 'word'` each value is split into words once and the word
+   * offsets are cached, so call `setData` again after mutating items in place.
    */
   setData(data: T[]): this {
     this._data = data;
-    this._tokens = null;
+    this._words = null;
     return this;
   }
 
@@ -210,32 +302,45 @@ export class ExSearch<T> {
       if (config[key] !== undefined) (defined as Record<string, unknown>)[key] = config[key];
     }
     this._config = normaliseConfig({ ...this._config, ...defined });
-    this._tokens = null;
+    this._words = null;
     return this;
   }
 
   /**
    * Synchronous search. Suitable for datasets up to ~50 000 records in
    * browser environments or any size in Node.js.
+   *
+   * Pass `options.within` to score only those row indices (for example the
+   * hits of the previous query when `canNarrow` says that is exact).
    */
-  search(query: string): SearchResult<T>[] {
+  search(query: string, options?: SearchWithinOptions): SearchResult<T>[] {
+    const rows = toRows(options?.within, this._data.length);
     if (!query.trim()) return [];
-    return runSearch(this._data, query, this._config, this._config.fuzzyMode === 'word' ? this._cachedTokens() : null);
+    return runSearch(this._data, query, this._config, this._wordIndex(), rows);
   }
 
-  private _cachedTokens(): TokenSource {
-    const nKeys = this._config.keys.length;
-    if (this._tokens === null) this._tokens = [];
-    const cache = this._tokens;
-    return (row, key, text) => {
-      const i = row * nKeys + key;
-      let tokens = cache[i];
-      if (tokens === undefined) {
-        tokens = kernel.tokenize(text);
-        cache[i] = tokens;
-      }
-      return tokens;
-    };
+  /**
+   * `canNarrow(prevQuery, nextQuery, config)` for this instance's current
+   * config: `true` only when `search(nextQuery, { within: <rows of the
+   * prevQuery hits> })` provably equals a full `search(nextQuery)`.
+   */
+  canNarrow(prevQuery: string, nextQuery: string): boolean {
+    return narrowable(prevQuery, nextQuery, this._config);
+  }
+
+  /** The cached word index in fuzzyMode 'word' (built on first use), else `null`. */
+  private _wordIndex(): WordIndex | null {
+    const cfg = this._config;
+    if (cfg.fuzzyMode !== 'word' || !(cfg.fuzzyMaxDistance > 0)) return null;
+    if (this._words === null) {
+      this._words = kernel.buildWordIndex(
+        textGetter(this._data, cfg),
+        this._data.length,
+        cfg.keys.length,
+        cfg.caseSensitive,
+      );
+    }
+    return this._words;
   }
 
   /**
@@ -252,21 +357,24 @@ export class ExSearch<T> {
   async searchAsync(query: string, options?: SearchOptions): Promise<SearchResult<T>[]> {
     const signal = options?.signal;
     throwIfAborted(signal);
+    const within = options?.within === undefined ? undefined : { within: options.within };
     if (!this._config.useWorker || typeof Worker === 'undefined') {
-      return this.search(query);
+      return this.search(query, within);
     }
+    const rows = toRows(options?.within, this._data.length);
     if (!query.trim()) return [];
 
     const cfg = this._config;
     const nKeys = cfg.keys.length;
     const data = this._data;
     const names = cfg.keys.map((k) => k.name as string | number | symbol);
+    const count = rows === null ? data.length : rows.length;
     // Only the projected key texts cross the thread boundary, never the rows
     // themselves, so rows holding functions, symbols or getters behave exactly
-    // as in the synchronous path.
+    // as in the synchronous path. With `within`, only those rows are sent.
     const texts: Array<string | null | undefined> = [];
-    for (let r = 0; r < data.length; r++) {
-      const item = data[r] as Record<string | number | symbol, unknown> | null | undefined;
+    for (let i = 0; i < count; i++) {
+      const item = data[rows === null ? i : rows[i]] as Record<string | number | symbol, unknown> | null | undefined;
       for (let k = 0; k < nKeys; k++) {
         texts.push(item == null ? undefined : kernel.toText(item[names[k]]));
       }
@@ -274,13 +382,14 @@ export class ExSearch<T> {
     const hits = await runInWorker(
       {
         texts,
-        nRows: data.length,
+        nRows: count,
         normQuery: normalise(query, cfg.caseSensitive),
         config: toKernelConfig(cfg),
       },
       signal,
     );
-    if (hits === null) return this.search(query); // Worker unusable: same answer, synchronously
+    if (hits === null) return this.search(query, within); // Worker unusable: same answer, synchronously
+    if (rows !== null) for (const hit of hits) hit.row = rows[hit.row];
     return buildResults(data, hits, cfg.sortAlgorithm);
   }
 }
@@ -406,14 +515,8 @@ function workerEntry(makeKernel: typeof createKernel) {
   self.onmessage = function (e: MessageEvent<any>) {
     const { texts, nRows, normQuery, config } = e.data;
     const nKeys = config.keys.length;
-    const tokensFor = config.fuzzyMode === 'word' ? (_r: number, _k: number, text: string) => k.tokenize(text) : null;
-    const hits = k.scoreRows(
-      (row: number, key: number) => texts[row * nKeys + key],
-      nRows,
-      normQuery,
-      config,
-      tokensFor,
-    );
+    // Word mode finds words on the fly: each Worker serves a single search.
+    const hits = k.scoreRows((row: number, key: number) => texts[row * nKeys + key], nRows, normQuery, config, null);
     self.postMessage(hits);
   };
 }
