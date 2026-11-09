@@ -213,20 +213,43 @@ export function createKernel() {
     return out;
   }
 
-  // Maximal runs of non-whitespace: the same words `tokenize` returns.
-  const WORD_RE = /\S+/g;
+  /** Whether a UTF-16 code unit is `\s`: the WhiteSpace and LineTerminator characters of ECMAScript. */
+  function isSpace(c: number): boolean {
+    if (c > 32 && c < 0xa0) return false;
+    return (
+      c === 32 ||
+      (c >= 9 && c <= 13) ||
+      c === 0xa0 ||
+      c === 0x1680 ||
+      (c >= 0x2000 && c <= 0x200a) ||
+      c === 0x2028 ||
+      c === 0x2029 ||
+      c === 0x202f ||
+      c === 0x205f ||
+      c === 0x3000 ||
+      c === 0xfeff
+    );
+  }
 
   /**
    * Appends the `[start, end)` offsets of the words of `text` to `out` and
-   * returns how many it appended. A text whose only word is the whole text
-   * appends nothing: that word is the value itself, scored separately.
+   * returns how many it appended. The words are the maximal runs of non-`\s`
+   * code units (what `text.split(/\s+/)` returns, minus the empty strings).
+   * A text whose only word is the whole text appends nothing: that word is
+   * the value itself, scored separately.
    */
   function wordSpans(text: string, out: number[]): number {
     const base = out.length;
-    WORD_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = WORD_RE.exec(text)) !== null) out.push(m.index, WORD_RE.lastIndex);
-    if (out.length - base === 2 && out[base] === 0 && out[base + 1] === text.length) out.length = base;
+    const len = text.length;
+    let i = 0;
+    while (i < len) {
+      while (i < len && isSpace(text.charCodeAt(i))) i++;
+      if (i === len) break;
+      const start = i;
+      while (i < len && !isSpace(text.charCodeAt(i))) i++;
+      out.push(start, i);
+    }
+    if (out.length - base === 2 && out[base] === 0 && out[base + 1] === len) out.length = base;
     return (out.length - base) / 2;
   }
 
