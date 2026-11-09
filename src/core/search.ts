@@ -403,9 +403,12 @@ function runInWorker<T, R>(data: T[], query: string, config: Required<SearchConf
 /**
  * Inlined worker source.
  * Self-contained copy of the scoring logic with no module imports so it
- * runs in an isolated Worker context without a bundler.
+ * runs in an isolated Worker context without a bundler. The `__name` shim
+ * keeps it working when a toolchain (esbuild `keepNames`, tsx) injects that
+ * helper into the serialised functions.
  */
 const WORKER_SOURCE = `
+var __name = function (f) { return f; };
 (${workerEntry.toString()})(${createKernel.toString()});
 `;
 
