@@ -82,9 +82,6 @@
     "ex-flow": {
       "optional": true
     },
-    "exsorted": {
-      "optional": true
-    },
     "react": {
       "optional": true
     }
