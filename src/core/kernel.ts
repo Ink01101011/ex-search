@@ -231,25 +231,39 @@ export function createKernel() {
   }
 
   /**
-   * Builds the word index of every (row, key) cell of `data`. Texts are derived
-   * and case-normalised exactly as `scoreRows` derives them. Offsets are stored
-   * as 16-bit integers when every text fits, else 32-bit.
+   * Builds the word index of every (row, key) cell of `data`. Offsets refer to
+   * the text as `scoreRows` derives and case-normalises it. They are stored as
+   * 16-bit integers when every text fits, else 32-bit. A `null` or `undefined`
+   * row has no cells (scoring such a row throws, as it always has). Returns
+   * `null` when the cell ids (`row * nKeys + key`, 32-bit) could not hold every
+   * cell: the caller then scores without an index, which finds the same words
+   * on the fly.
    */
-  function buildWordIndex<T>(data: T[], keys: KernelKey[], caseSensitive: boolean): WordIndex {
+  function buildWordIndex<T>(data: T[], keys: KernelKey[], caseSensitive: boolean): WordIndex | null {
     const nKeys = keys.length;
-    let cells = new Uint32Array(64);
-    let starts = new Uint32Array(65);
-    let spans = new Uint32Array(128);
+    const total = data.length * nKeys;
+    if (!(total <= 0xffffffff)) return null;
+
+    // Pre-sized for the common case so the typed arrays rarely have to grow.
+    const cap = (total < 1 << 20 ? total : 1 << 20) + 1;
+    let cells = new Uint32Array(cap);
+    let starts = new Uint32Array(cap + 1);
+    let spans = new Uint32Array(Math.min((cap - 1) * 6 + 16, 1 << 23));
     let nCells = 0;
     let nSpans = 0;
     let maxLen = 0;
     const scratch: number[] = [];
 
     for (let r = 0; r < data.length; r++) {
-      const item = data[r] as Record<string | number | symbol, unknown>;
+      const item = data[r] as Record<string | number | symbol, unknown> | null | undefined;
+      if (item == null) continue;
       for (let k = 0; k < nKeys; k++) {
         const raw = String(item[keys[k].name] ?? '');
-        const text = caseSensitive ? raw : raw.toLowerCase();
+        // Lower-casing keeps every offset and every whitespace position in place
+        // except for U+0130, which grows to two code units. So the words of the
+        // raw text sit at the offsets of the lower-cased text, and only a text
+        // with U+0130 needs the real thing here (scoring lower-cases it again).
+        const text = caseSensitive || raw.indexOf('\u0130') === -1 ? raw : raw.toLowerCase();
         scratch.length = 0;
         if (wordSpans(text, scratch) === 0) continue;
 
@@ -268,11 +282,14 @@ export function createKernel() {
       }
     }
 
-    return {
-      cells: cells.slice(0, nCells),
-      starts: starts.slice(0, nCells + 1),
-      spans: maxLen <= 0xffff ? Uint16Array.from(spans.subarray(0, nSpans)) : spans.slice(0, nSpans),
-    };
+    let packed: Uint16Array | Uint32Array;
+    if (maxLen <= 0xffff) {
+      packed = new Uint16Array(nSpans);
+      packed.set(spans.subarray(0, nSpans));
+    } else {
+      packed = spans.slice(0, nSpans);
+    }
+    return { cells: cells.slice(0, nCells), starts: starts.slice(0, nCells + 1), spans: packed };
   }
 
   function grow(a: Uint32Array, size: number): Uint32Array<ArrayBuffer> {

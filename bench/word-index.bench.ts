@@ -50,6 +50,7 @@ const repeats = typed.map((q) => time(() => s.search(q)));
 // Index size, measured directly from its typed arrays.
 const k = createKernel();
 const idx = k.buildWordIndex(data, keys, false);
+if (idx === null) throw new Error('word index not built');
 const bytes = idx.cells.byteLength + idx.starts.byteLength + idx.spans.byteLength;
 
 // The previous cache: one string[] per (row, key).

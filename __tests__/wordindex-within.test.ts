@@ -194,7 +194,7 @@ describe('word index (fuzzyMode word)', () => {
   it('uses 32-bit offsets when a value is longer than 65 535 code units', () => {
     const k = createKernel();
     const long = 'a'.repeat(70000) + ' somchai';
-    const idx = k.buildWordIndex([{ n: long }, { n: 'x y' }], [{ name: 'n', weight: 1 }], false);
+    const idx = k.buildWordIndex([{ n: long }, { n: 'x y' }], [{ name: 'n', weight: 1 }], false)!;
     expect(idx.spans).toBeInstanceOf(Uint32Array);
     const data = [{ name: long }, { name: 'x y' }];
     const s = createSearch({ keys: [{ name: 'name', weight: 1 }], fuzzyMode: 'word' }).setData(data);
@@ -217,7 +217,7 @@ describe('word index (fuzzyMode word)', () => {
         { name: 'q', weight: 1 },
       ],
       false,
-    );
+    )!;
     expect(idx.spans).toBeInstanceOf(Uint16Array);
     expect(Array.from(idx.cells)).toEqual([1, 2]);
     expect(Array.from(idx.starts)).toEqual([0, 2, 3]);
