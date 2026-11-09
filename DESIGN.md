@@ -90,8 +90,25 @@ thread and the Worker run identical code.
 3. **Distance** — Myers bit-parallel when the query is ≤ 32 chars (one 32-bit
    word); otherwise an Ukkonen-banded DP bounded by `fuzzyMaxDistance`,
    O(n·k), with early exit once every cell in a row exceeds the bound.
-4. **`fuzzyMode: 'word'`** — the matcher also runs over each whitespace token
-   of the value; the best score wins. `ExSearch` caches tokens per (row, key)
-   and drops the cache on `setData` / `updateConfig`.
-5. **Allocation** — per-key scores go into reusable arrays; `fieldMatches` and
+4. **`fuzzyMode: 'word'`** — the matcher also runs over each whitespace word
+   of the value (maximal `\S+` runs, the same words `split(/\s+/)` gives); the
+   best score wins. `ExSearch` builds a word index once per data / config
+   version and drops it on `setData` / `updateConfig`. The index stores no
+   strings: `cells` (ascending `row × nKeys + key` of the cells with words),
+   `starts` (word range per listed cell) and `spans` (flat `[start, end)`
+   offsets into the case-normalised text; `Uint16Array` unless a value is
+   longer than 65 535 code units). A cell whose only word is the whole value
+   is left out, since tier 4 already scored the whole value. The matcher
+   compares the query with `text[start, end)` in place, so a repeat query
+   neither splits nor slices. The one-shot `search()` and the Worker find the
+   words on the fly with the same splitter.
+5. **Row subset (`within`)** — the subset is normalised to ascending, unique,
+   in-range indices and the kernel visits only those rows, in the same order a
+   full scan would, so ties rank identically. `canNarrow` proves
+   `hits(next) ⊆ hits(prev)` from the tier scores alone: with the fuzzy tier
+   off, a field scoring 100 / 80 / 65 on `next` scores at least
+   `min(tier, 80)` on `prev` when `prev` is a prefix of `next` (`min(tier, 65)`
+   when it is only a substring), and each key's weight is checked against
+   `threshold` with the kernel's own arithmetic.
+6. **Allocation** — per-key scores go into reusable arrays; `fieldMatches` and
    the result object are built only for rows at or above `threshold`.

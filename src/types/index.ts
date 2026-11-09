@@ -62,7 +62,8 @@ export interface SearchConfig<T> {
    * 'word'  — the whole value **and** each whitespace-separated word of it;
    *           the best one wins, so "Somchay" matches "Somchai Jaidee".
    *           Exact / startsWith / contains still use the whole value.
-   *           `ExSearch` tokenises each value once per `setData` / `updateConfig`.
+   *           `ExSearch` splits each value into words once per `setData` /
+   *           `updateConfig` and keeps only compact word offsets.
    * @default 'value'
    */
   fuzzyMode?: FuzzyMode;
@@ -87,6 +88,20 @@ export interface SearchConfig<T> {
    * @default false
    */
   useWorker?: boolean;
+}
+
+/** Per-call options for `search` / `searchAsync`. */
+export interface SearchWithinOptions {
+  /**
+   * Score only these row indices of the data (array or typed array). Each
+   * listed row is scored with exactly the same rules as a full search, so the
+   * result equals a full search filtered to these rows. Indices that are not
+   * an integer row of the data are ignored; duplicates count once.
+   *
+   * Narrowing to the previous query's hits is exact only in some cases: check
+   * with `canNarrow(prevQuery, nextQuery)` first.
+   */
+  within?: ArrayLike<number>;
 }
 
 // ---------------------------------------------------------------------------

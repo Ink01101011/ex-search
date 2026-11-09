@@ -20,12 +20,13 @@
  *  timSort   (exsorted): O(n log n) stable — used when sortAlgorithm = 'tim'
  */
 
-export { search, createSearch, ExSearch } from './core/search';
+export { search, canNarrow, createSearch, ExSearch } from './core/search';
 
 export { Scorer } from './core/scorer';
 
 export type {
   SearchConfig,
+  SearchWithinOptions,
   SearchKey,
   SearchResult,
   FieldMatch,
