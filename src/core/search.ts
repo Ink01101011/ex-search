@@ -1,5 +1,5 @@
 import { radixSort, timSort } from 'exsorted';
-import type { SearchConfig, SearchResult, SearchWithinOptions } from '../types';
+import type { SearchConfig, SearchResult, SearchWithinOptions, SearchWithRows } from '../types';
 import { createKernel, type KernelConfig, type WordIndex } from './kernel';
 
 // ---------------------------------------------------------------------------
@@ -26,6 +26,36 @@ function runSearch<T>(
   const scored = kernel.scoreRows(data, normQuery, cfg as KernelConfig, words, rows) as SearchResult<T>[];
   return sortDescending(scored, cfg.sortAlgorithm);
 }
+
+/**
+ * `runSearch` that also tracks the data index of each result. The results are
+ * ranked with the same algorithm and keys as `runSearch`, through index
+ * wrappers, so `results` is in the same order `runSearch` gives.
+ */
+function runSearchWithRows<T>(
+  data: T[],
+  query: string,
+  cfg: Required<SearchConfig<T>>,
+  words: WordIndex | null,
+  rows: Uint32Array | null,
+): SearchWithRows<T> {
+  const normQuery = normalise(query, cfg.caseSensitive);
+  const found: number[] = [];
+  const scored = kernel.scoreRows(data, normQuery, cfg as KernelConfig, words, rows, found) as SearchResult<T>[];
+  const order = sortDescending(
+    scored.map((r, i) => ({ score: r.score, i })),
+    cfg.sortAlgorithm,
+  );
+  const results: SearchResult<T>[] = [];
+  const out = new Uint32Array(order.length);
+  for (let j = 0; j < order.length; j++) {
+    results.push(scored[order[j].i]);
+    out[j] = found[order[j].i];
+  }
+  return { results, rows: out };
+}
+
+const NO_HITS = <T>(): SearchWithRows<T> => ({ results: [], rows: new Uint32Array(0) });
 
 /**
  * Normalises a `within` subset to ascending, unique, in-range row indices.
@@ -66,7 +96,7 @@ function toRows(within: ArrayLike<number> | null | undefined, nRows: number): Ui
 // Sorting
 // ---------------------------------------------------------------------------
 
-function sortDescending<T>(results: SearchResult<T>[], algorithm: 'radix' | 'tim'): SearchResult<T>[] {
+function sortDescending<H extends { score: number }>(results: H[], algorithm: 'radix' | 'tim'): H[] {
   if (results.length === 0) return results;
 
   if (algorithm === 'radix') {
@@ -128,6 +158,22 @@ export function search<T>(
 
   const cfg = normaliseConfig(config);
   return runSearch(data, query, cfg, null, rows);
+}
+
+/**
+ * `search()` that also returns where each result came from: `rows[i]` is the
+ * index in `data` of `results[i]`. Pass `rows` back as `within` to narrow the
+ * next query (when `canNarrow` allows it).
+ */
+export function searchWithRows<T>(
+  data: T[],
+  query: string,
+  config: SearchConfig<T>,
+  options?: SearchWithinOptions,
+): SearchWithRows<T> {
+  const rows = toRows(options?.within, data.length);
+  if (!query.trim()) return NO_HITS();
+  return runSearchWithRows(data, query, normaliseConfig(config), null, rows);
 }
 
 /**
@@ -244,6 +290,17 @@ export class ExSearch<T> {
   }
 
   /**
+   * `search()` that also returns where each result came from: `rows[i]` is the
+   * data index of `results[i]`. Pass `rows` back as `within` to narrow the next
+   * query when `canNarrow(prevQuery, nextQuery)` is `true`.
+   */
+  searchWithRows(query: string, options?: SearchWithinOptions): SearchWithRows<T> {
+    const rows = toRows(options?.within, this._data.length);
+    if (!query.trim()) return NO_HITS();
+    return runSearchWithRows(this._data, query, this._config, this._wordIndex(), rows);
+  }
+
+  /**
    * `canNarrow(prevQuery, nextQuery, config)` for this instance's current
    * config: `true` only when `search(nextQuery, { within: <rows of the
    * prevQuery hits> })` provably equals a full `search(nextQuery)`.
@@ -276,7 +333,23 @@ export class ExSearch<T> {
     }
     const rows = toRows(options?.within, this._data.length);
     const data = rows === null ? this._data : Array.from(rows, (r) => this._data[r]);
-    return runInWorker(data, query, this._config);
+    return runInWorker<T, SearchResult<T>[]>(data, query, this._config, false);
+  }
+
+  /**
+   * `searchAsync()` that also returns the data index of each result, as
+   * `searchWithRows()` does. `results` equals what `searchAsync()` gives.
+   */
+  async searchAsyncWithRows(query: string, options?: SearchWithinOptions): Promise<SearchWithRows<T>> {
+    if (!this._config.useWorker || typeof Worker === 'undefined') {
+      return this.searchWithRows(query, options);
+    }
+    const rows = toRows(options?.within, this._data.length);
+    const data = rows === null ? this._data : Array.from(rows, (r) => this._data[r]);
+    const res = await runInWorker<T, { results: SearchResult<T>[]; rows: number[] }>(data, query, this._config, true);
+    const out = new Uint32Array(res.rows.length);
+    for (let i = 0; i < out.length; i++) out[i] = rows === null ? res.rows[i] : rows[res.rows[i]];
+    return { results: res.results, rows: out };
   }
 }
 
@@ -299,13 +372,13 @@ export function createSearch<T>(config: SearchConfig<T>): ExSearch<T> {
 // normQuery is pre-normalised by the caller so the worker does not need
 // to re-apply case normalisation to the query on every item.
 
-function runInWorker<T>(data: T[], query: string, config: Required<SearchConfig<T>>): Promise<SearchResult<T>[]> {
+function runInWorker<T, R>(data: T[], query: string, config: Required<SearchConfig<T>>, withRows: boolean): Promise<R> {
   return new Promise((resolve, reject) => {
     const blob = new Blob([WORKER_SOURCE], { type: 'application/javascript' });
     const url = URL.createObjectURL(blob);
     const worker = new Worker(url);
 
-    worker.onmessage = (e: MessageEvent<SearchResult<T>[]>) => {
+    worker.onmessage = (e: MessageEvent<R>) => {
       URL.revokeObjectURL(url);
       worker.terminate();
       resolve(e.data);
@@ -318,7 +391,7 @@ function runInWorker<T>(data: T[], query: string, config: Required<SearchConfig<
     };
 
     const normQuery = config.caseSensitive ? query : query.toLowerCase();
-    worker.postMessage({ data, normQuery, config });
+    worker.postMessage({ data, normQuery, config, withRows });
   });
 }
 
@@ -338,10 +411,19 @@ function workerEntry(makeKernel: typeof createKernel) {
   const k = makeKernel();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   self.onmessage = function (e: MessageEvent<any>) {
-    const { data, normQuery, config } = e.data;
+    const { data, normQuery, config, withRows } = e.data;
     // Word mode finds words on the fly: each Worker serves a single search.
-    const results = k.scoreRows(data, normQuery, config, null);
-    results.sort((a, b) => (b.score as number) - (a.score as number));
-    self.postMessage(results);
+    if (!withRows) {
+      const results = k.scoreRows(data, normQuery, config, null);
+      results.sort((a, b) => (b.score as number) - (a.score as number));
+      self.postMessage(results);
+      return;
+    }
+    // Same ranking as above (stable sort on score), applied to the row indices too.
+    const found: number[] = [];
+    const scored = k.scoreRows(data, normQuery, config, null, null, found);
+    const order = scored.map((_r, i) => i);
+    order.sort((a, b) => (scored[b].score as number) - (scored[a].score as number));
+    self.postMessage({ results: order.map((i) => scored[i]), rows: order.map((i) => found[i]) });
   };
 }

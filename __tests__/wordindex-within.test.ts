@@ -1,4 +1,4 @@
-import { canNarrow, createSearch, ExSearch, search, __WORKER_SOURCE__ } from '../src/core/search';
+import { canNarrow, createSearch, ExSearch, search, searchWithRows, __WORKER_SOURCE__ } from '../src/core/search';
 import { createKernel } from '../src/core/kernel';
 import type { SearchConfig, SearchResult } from '../src/types';
 
@@ -377,5 +377,104 @@ describe('canNarrow', () => {
       }
     }
     expect(trues).toBeGreaterThan(200);
+  });
+});
+
+/** Installs a browser-like Worker that runs the real worker source; returns a restore function. */
+function installWorker(): () => void {
+  const g = globalThis as Record<string, unknown>;
+  const saved = { Worker: g.Worker, create: URL.createObjectURL, revoke: URL.revokeObjectURL };
+  g.Worker = class {
+    onmessage: ((e: { data: unknown }) => void) | null = null;
+    private readonly self: { onmessage?: (e: { data: unknown }) => void; postMessage: (r: unknown) => void };
+    constructor() {
+      this.self = { postMessage: (r) => queueMicrotask(() => this.onmessage?.({ data: structuredClone(r) })) };
+      new Function('self', __WORKER_SOURCE__)(this.self);
+    }
+    postMessage(m: unknown) {
+      this.self.onmessage!({ data: structuredClone(m) });
+    }
+    terminate() {}
+  };
+  URL.createObjectURL = () => 'blob:test';
+  URL.revokeObjectURL = () => undefined;
+  return () => {
+    g.Worker = saved.Worker;
+    URL.createObjectURL = saved.create;
+    URL.revokeObjectURL = saved.revoke;
+  };
+}
+
+describe('searchWithRows', () => {
+  it('returns search() results plus the data index of each one (randomised)', () => {
+    const rnd = prng(31);
+    for (let round = 0; round < 30; round++) {
+      const data = makeData(rnd, 120);
+      const cfg = makeConfig(rnd);
+      const s = createSearch(cfg).setData(data);
+      for (let i = 0; i < 10; i++) {
+        const q = makeQuery(rnd);
+        const within = rnd() < 0.5 ? randomWithin(rnd, data.length) : undefined;
+        const opts = within && { within };
+        const { results, rows } = s.searchWithRows(q, opts);
+        expect(rows).toBeInstanceOf(Uint32Array);
+        expect(results).toEqual(s.search(q, opts));
+        expect(rows).toHaveLength(results.length);
+        results.forEach((r, j) => expect((r as unknown as Row).id).toBe(data[rows[j]].id));
+        expect(searchWithRows(data, q, cfg, opts)).toEqual({ results, rows });
+      }
+    }
+  });
+
+  it('gives empty results and rows for a blank query', () => {
+    const s = createSearch({ keys: [{ name: 'name', weight: 1 }] }).setData([{ name: 'a' }]);
+    expect(s.searchWithRows('  ')).toEqual({ results: [], rows: new Uint32Array(0) });
+  });
+
+  it('feeds within directly: narrowing with rows equals a cold search when canNarrow says so', () => {
+    const rnd = prng(77);
+    let narrowed = 0;
+    for (let round = 0; round < 30; round++) {
+      const data = makeData(rnd, 120);
+      const cfg = { ...makeConfig(rnd), fuzzyMaxDistance: 0 };
+      const s = createSearch(cfg).setData(data);
+      let prev = '';
+      let prevRows: Uint32Array | undefined;
+      const word = WORDS[Math.floor(rnd() * WORDS.length)];
+      for (let n = 1; n <= word.length; n++) {
+        const q = word.slice(0, n);
+        const opts = prevRows && s.canNarrow(prev, q) ? { within: prevRows } : undefined;
+        if (opts) narrowed++;
+        const { results, rows } = s.searchWithRows(q, opts);
+        expect(results).toEqual(s.search(q));
+        prev = q;
+        prevRows = rows;
+      }
+    }
+    expect(narrowed).toBeGreaterThan(20);
+  });
+
+  it('searchAsyncWithRows: results equal searchAsync, rows point at them (fallback and Worker)', async () => {
+    const rnd = prng(5);
+    const data = makeData(rnd, 80);
+    const cfg: SearchConfig<Row> = { ...makeConfig(rnd), fuzzyMode: 'word', fuzzyMaxDistance: 2, threshold: 0 };
+    const within = [70, 3, 55, 3, 41, 12, 9, 200, -1];
+    const sync = createSearch(cfg).setData(data).searchWithRows('somchay', { within });
+    expect(sync.rows.length).toBeGreaterThan(3);
+    expect(await createSearch(cfg).setData(data).searchAsyncWithRows('somchay', { within })).toEqual(sync);
+
+    if (typeof (globalThis as { __coverage__?: unknown }).__coverage__ !== 'undefined') return;
+    const restore = installWorker();
+    try {
+      const s = new ExSearch({ ...cfg, useWorker: true }).setData(data);
+      for (const opts of [{ within }, undefined]) {
+        const { results, rows } = await s.searchAsyncWithRows('somchay', opts);
+        expect(results).toEqual(await s.searchAsync('somchay', opts));
+        expect(results.length).toBeGreaterThan(3);
+        results.forEach((r, j) => expect((r as unknown as Row).id).toBe(data[rows[j]].id));
+      }
+    } finally {
+      restore();
+    }
   });
 });
