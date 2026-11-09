@@ -175,20 +175,22 @@ Narrowing to the previous query's hits while the user types is **not** always ex
 - both queries are the same after trimming and case folding (any config), or
 - `fuzzyMaxDistance: 0`, the previous query is a substring of the next one (typing at the end or start), and no key weight lets a row pass `threshold` on the next query while failing it on the previous one (an exact hit on the next query is only a starts-with or contains hit on the previous one).
 
+`searchWithRows` returns the results plus `rows`, the data index of each result (`rows[i]` belongs to `results[i]`), ready to pass back as `within`:
+
 ```typescript
 let prev = '';
-let prevRows: number[] = [];
+let prevRows: Uint32Array | undefined;
 
 function onType(query: string) {
-  const options = searcher.canNarrow(prev, query) ? { within: prevRows } : undefined;
-  const results = searcher.search(query, options);
+  const options = prevRows && searcher.canNarrow(prev, query) ? { within: prevRows } : undefined;
+  const { results, rows } = searcher.searchWithRows(query, options);
   prev = query;
-  prevRows = results.map((r) => rowIndexById.get(r.id)!); // your own id → row index map
+  prevRows = rows;
   return results;
 }
 ```
 
-The standalone form is `canNarrow(prevQuery, nextQuery, config)`.
+The standalone forms are `canNarrow(prevQuery, nextQuery, config)` and `searchWithRows(data, query, config, options?)`; `searchAsyncWithRows` is the async variant.
 
 ### 3. Async search with Web Worker (large datasets, browser only)
 
@@ -371,6 +373,21 @@ Returns an empty array when `query` is an empty string or whitespace only. `opti
 
 ---
 
+### `searchWithRows<T>(data, query, config, options?)`
+
+`search()` plus the data index of each result: `rows[i]` is the index in `data` of `results[i]`.
+
+```typescript
+function searchWithRows<T>(
+  data: T[],
+  query: string,
+  config: SearchConfig<T>,
+  options?: SearchWithinOptions,
+): SearchWithRows<T>; // { results: SearchResult<T>[]; rows: Uint32Array }
+```
+
+---
+
 ### `canNarrow<T>(prevQuery, nextQuery, config)`
 
 `true` only when `search(nextQuery, { within: <row indices of the prevQuery hits> })` provably equals a full search for `nextQuery` under `config`. Always `false` with fuzzy matching on (unless the two queries normalise to the same string) and for a blank query.
@@ -404,6 +421,8 @@ class ExSearch<T> {
 
   search(query: string, options?: SearchWithinOptions): SearchResult<T>[];
   searchAsync(query: string, options?: SearchOptions): Promise<SearchResult<T>[]>;
+  searchWithRows(query: string, options?: SearchWithinOptions): SearchWithRows<T>;
+  searchAsyncWithRows(query: string, options?: SearchOptions): Promise<SearchWithRows<T>>;
   canNarrow(prevQuery: string, nextQuery: string): boolean;
 }
 ```
@@ -413,6 +432,8 @@ class ExSearch<T> {
 **`updateConfig(partial)`** — Merge a partial config update. All fields are optional; unspecified fields keep their previous value. Returns `this` for chaining.
 
 **`search(query, options?)`** — Synchronous. Suitable for datasets up to ~50 000 records in browser environments or any size in Node.js. `options.within` scores only those row indices; indices that are not an integer row of the data are ignored and duplicates count once.
+
+**`searchWithRows(query, options?)`** / **`searchAsyncWithRows(query, options?)`** — Same results as `search()` / `searchAsync()`, plus `rows`: the data index of each result, in result order. Pass `rows` back as `within`.
 
 **`canNarrow(prevQuery, nextQuery)`** — `canNarrow` for this instance's current config.
 
@@ -601,6 +622,7 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 | `SortAlgorithm`       | `'radix' \| 'tim'`                                                                         |
 | `FuzzyMode`           | `'value' \| 'word'`: what the fuzzy tier compares the query against                        |
 | `SearchWithinOptions` | `{ within?: ArrayLike<number> }`: per-call options for `search`                            |
+| `SearchWithRows<T>`   | `{ results: SearchResult<T>[]; rows: Uint32Array }`: results plus their data indices       |
 | `SearchOptions`       | `{ signal?: AbortSignal; within?: ArrayLike<number> }`: per-call options for `searchAsync` |
 | `Comparator<T>`       | `(a: T, b: T) => number`: three-way comparator for the precision searches                  |
 | `ScorerAPI`           | Shape of the exported `Scorer` object                                                      |
