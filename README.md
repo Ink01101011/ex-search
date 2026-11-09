@@ -152,6 +152,8 @@ const r3 = searcher.search('สาขาสยามพารากอม'); // 
 By default the fuzzy tier measures the distance to the **whole** value, so a one-letter typo in one word of `"Somchai Jaidee"` is too far away to match. Opt in to word-level fuzzy matching:
 
 ```typescript
+import { createSearch } from 'ex-search';
+
 const people = createSearch<Person>({
   keys: [{ name: 'fullName', weight: 1.0 }],
   fuzzyMode: 'word',
@@ -164,7 +166,7 @@ people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'S
 
 #### Searching only some rows — `within` and `canNarrow`
 
-Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows.
+Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows. Field values and getters must return the same text every time they are read, because word mode reads each field once more to build its index. `within` must be an array-like whose `length` is a number from 0 to 2³²−1; anything else throws a `TypeError`.
 
 ```typescript
 const subset = searcher.search('name 123', { within: [0, 4, 17] });
@@ -297,7 +299,7 @@ function BranchList({ branches }: { branches: Branch[] }) {
 
 A search that is superseded by a newer query, or whose component unmounts, is **aborted**: its Worker is terminated and nothing is reported. If the async path fails (for example a Worker runtime error) the hook retries with the synchronous search; only when that fails too does it return `results: []` together with a non-null `error`.
 
-**Config stability note** — both hooks compare `config` by **content** (each key's name and weight, plus `threshold`, `fuzzyMaxDistance`, `caseSensitive`, `sortAlgorithm`, `useWorker` and `fuzzyMode`), not by object identity. An inline config such as `useExSearch(data, query, { keys: [...] })` is therefore safe: it does not rebuild the searcher or restart the effect, and the word-mode token cache survives re-renders. Wrapping the config in `useMemo` is optional.
+**Config stability note** — both hooks compare `config` by **content** (each key's name and weight, plus `threshold`, `fuzzyMaxDistance`, `caseSensitive`, `sortAlgorithm`, `useWorker` and `fuzzyMode`), not by object identity. An inline config such as `useExSearch(data, query, { keys: [...] })` is therefore safe: it does not rebuild the searcher or restart the effect, and the word-mode word index survives re-renders. Wrapping the config in `useMemo` is optional.
 
 ### 6. Piping results into ex-flow
 
@@ -626,6 +628,17 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 | `SearchOptions`       | `{ signal?: AbortSignal; within?: ArrayLike<number> }`: per-call options for `searchAsync` |
 | `Comparator<T>`       | `(a: T, b: T) => number`: three-way comparator for the precision searches                  |
 | `ScorerAPI`           | Shape of the exported `Scorer` object                                                      |
+
+## What's new in 2.1.0
+
+All additive; results of existing calls are unchanged.
+
+- **Compact word index** — `fuzzyMode: 'word'` keeps word offsets instead of a string array per value (about 2.8 MB instead of about 90 MB at 100 000 rows × 4 keys). A repeat query does no splitting.
+- **`within`** — `search(query, { within })`, `searchAsync(query, { within })` and `search(data, query, config, { within })` score only the given row indices.
+- **`canNarrow(prevQuery, nextQuery)`** — tells when narrowing to the previous hits is provably exact.
+- **`searchWithRows` / `searchAsyncWithRows`** — the results plus the data index of each one, ready to pass back as `within`.
+
+The same APIs ship on the 1.x line in 1.2.1.
 
 ## Upgrading from 1.x
 

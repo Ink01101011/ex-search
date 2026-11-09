@@ -56,7 +56,7 @@ export function useExSearchAsync<T>(
   const [error, setError] = useState<Error | null>(null);
   const searcherRef = useRef<ExSearch<T> | null>(null);
   // Identities last pushed into the searcher: re-pushing an unchanged config
-  // or dataset would drop the word-mode token cache on every keystroke.
+  // or dataset would drop the word-mode word index on every keystroke.
   const appliedData = useRef<T[] | null>(null);
   const appliedConfig = useRef<SearchConfig<T> | null>(null);
 
