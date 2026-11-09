@@ -1,4 +1,4 @@
-import { canNarrow, createSearch, ExSearch, search } from '../src/core/search';
+import { canNarrow, createSearch, ExSearch, search, searchWithRows } from '../src/core/search';
 import { createKernel } from '../src/core/kernel';
 import type { SearchConfig, SearchResult } from '../src/types';
 import { FakeWorker, installFakeWorker } from './helpers/fakeWorker';
@@ -347,5 +347,75 @@ describe('canNarrow', () => {
       }
     }
     expect(trues).toBeGreaterThan(200);
+  });
+});
+
+describe('searchWithRows', () => {
+  it('returns search() results plus the data index of each one (randomised)', () => {
+    const rnd = prng(31);
+    for (let round = 0; round < 30; round++) {
+      const data = makeData(rnd, 120);
+      const cfg = makeConfig(rnd);
+      const s = createSearch(cfg).setData(data as Row[]);
+      for (let i = 0; i < 10; i++) {
+        const q = makeQuery(rnd);
+        const within = rnd() < 0.5 ? randomWithin(rnd, data.length) : undefined;
+        const opts = within && { within };
+        const { results, rows } = s.searchWithRows(q, opts);
+        expect(rows).toBeInstanceOf(Uint32Array);
+        expect(results).toEqual(s.search(q, opts));
+        expect(rows).toHaveLength(results.length);
+        results.forEach((r, j) => expect((r as unknown as Row).id).toBe((data[rows[j]] as Row).id));
+        expect(searchWithRows(data as Row[], q, cfg, opts)).toEqual({ results, rows });
+      }
+    }
+  });
+
+  it('gives empty results and rows for a blank query', () => {
+    const s = createSearch({ keys: [{ name: 'name', weight: 1 }] }).setData([{ name: 'a' }]);
+    expect(s.searchWithRows('  ')).toEqual({ results: [], rows: new Uint32Array(0) });
+  });
+
+  it('feeds within directly: narrowing with rows equals a cold search when canNarrow says so', () => {
+    const rnd = prng(77);
+    let narrowed = 0;
+    for (let round = 0; round < 30; round++) {
+      const data = makeData(rnd, 120);
+      const cfg = { ...makeConfig(rnd), fuzzyMaxDistance: 0 };
+      const s = createSearch(cfg).setData(data as Row[]);
+      let prev = '';
+      let prevRows: Uint32Array | undefined;
+      const word = WORDS[Math.floor(rnd() * WORDS.length)];
+      for (let n = 1; n <= word.length; n++) {
+        const q = word.slice(0, n);
+        const opts = prevRows && s.canNarrow(prev, q) ? { within: prevRows } : undefined;
+        if (opts) narrowed++;
+        const { results, rows } = s.searchWithRows(q, opts);
+        expect(results).toEqual(s.search(q));
+        prev = q;
+        prevRows = rows;
+      }
+    }
+    expect(narrowed).toBeGreaterThan(20);
+  });
+
+  it('searchAsyncWithRows matches the sync rows, in the Worker and in the fallback', async () => {
+    const rnd = prng(5);
+    const data = makeData(rnd, 80) as Row[];
+    const cfg: SearchConfig<Row> = { ...makeConfig(rnd), fuzzyMode: 'word', fuzzyMaxDistance: 2, threshold: 0 };
+    const within = [70, 3, 55, 3, 41, 12, 9, 200, -1];
+    const sync = createSearch(cfg).setData(data).searchWithRows('somchay', { within });
+    expect(sync.rows.length).toBeGreaterThan(3);
+    expect(await createSearch(cfg).setData(data).searchAsyncWithRows('somchay', { within })).toEqual(sync);
+
+    const restore = installFakeWorker();
+    try {
+      FakeWorker.reset('ok');
+      const s = new ExSearch({ ...cfg, useWorker: true }).setData(data);
+      expect(await s.searchAsyncWithRows('somchay', { within })).toEqual(sync);
+      expect(await s.searchAsyncWithRows('somchay')).toEqual(createSearch(cfg).setData(data).searchWithRows('somchay'));
+    } finally {
+      restore();
+    }
   });
 });

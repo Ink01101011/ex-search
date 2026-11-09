@@ -139,6 +139,16 @@ export type SearchResult<T> = Omit<T, 'exFlowPriority'> & {
   fieldMatches: FieldMatch[];
 };
 
+/**
+ * Results plus where each one came from: `rows[i]` is the index in the data of
+ * `results[i]`. Returned by `searchWithRows` / `searchAsyncWithRows`; pass
+ * `rows` back as `within` to narrow the next query.
+ */
+export interface SearchWithRows<T> {
+  results: SearchResult<T>[];
+  rows: Uint32Array;
+}
+
 // ---------------------------------------------------------------------------
 // Scorer (low-level utilities exposed for custom use)
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { radixSort, timSort } from 'exsorted';
-import type { SearchConfig, SearchResult, SearchOptions, SearchWithinOptions } from '../types';
+import type { SearchConfig, SearchResult, SearchOptions, SearchWithinOptions, SearchWithRows } from '../types';
 import { createKernel, type KernelConfig, type KernelHit, type WordIndex } from './kernel';
 
 // ---------------------------------------------------------------------------
@@ -27,20 +27,29 @@ function toKernelConfig<T>(cfg: Required<SearchConfig<T>>): KernelConfig {
   };
 }
 
-/** Builds the public result object from the original row and its hit. */
-function buildResults<T>(data: T[], hits: KernelHit[], algorithm: 'radix' | 'tim'): SearchResult<T>[] {
-  const out: SearchResult<T>[] = [];
-  for (let i = 0; i < hits.length; i++) {
-    const hit = hits[i];
+/**
+ * Ranks the hits and builds the public result objects from the original rows.
+ * `rows[i]` is the data index of `results[i]`. Hits are ranked (not the result
+ * objects), with the same keys, so the order is the one ranking results gives.
+ */
+function buildResults<T>(data: T[], hits: KernelHit[], algorithm: 'radix' | 'tim'): SearchWithRows<T> {
+  const ranked = sortDescending(hits, algorithm);
+  const results: SearchResult<T>[] = [];
+  const rows = new Uint32Array(ranked.length);
+  for (let i = 0; i < ranked.length; i++) {
+    const hit = ranked[i];
     // Spread (not Object.assign) so an own "__proto__" key stays a plain property.
     const result = { ...(data[hit.row] as object) } as Record<string, unknown>;
     result.exFlowPriority = Math.round(hit.best);
     result.score = hit.score;
     result.fieldMatches = hit.fieldMatches;
-    out.push(result as SearchResult<T>);
+    results.push(result as SearchResult<T>);
+    rows[i] = hit.row;
   }
-  return sortDescending(out, algorithm);
+  return { results, rows };
 }
+
+const NO_HITS = <T>(): SearchWithRows<T> => ({ results: [], rows: new Uint32Array(0) });
 
 function normalise(query: string, caseSensitive: boolean): string {
   const q = query.trim();
@@ -63,7 +72,7 @@ function runSearch<T>(
   cfg: Required<SearchConfig<T>>,
   words: WordIndex | null,
   rows: Uint32Array | null,
-): SearchResult<T>[] {
+): SearchWithRows<T> {
   const hits = kernel.scoreRows(
     textGetter(data, cfg),
     data.length,
@@ -114,7 +123,7 @@ function toRows(within: ArrayLike<number> | null | undefined, nRows: number): Ui
 // Sorting
 // ---------------------------------------------------------------------------
 
-function sortDescending<T>(results: SearchResult<T>[], algorithm: 'radix' | 'tim'): SearchResult<T>[] {
+function sortDescending<H extends { score: number }>(results: H[], algorithm: 'radix' | 'tim'): H[] {
   if (results.length === 0) return results;
 
   if (algorithm === 'radix') {
@@ -198,9 +207,23 @@ export function search<T>(
   config: SearchConfig<T>,
   options?: SearchWithinOptions,
 ): SearchResult<T>[] {
+  return searchWithRows(data, query, config, options).results;
+}
+
+/**
+ * `search()` that also returns where each result came from: `rows[i]` is the
+ * index in `data` of `results[i]`. Pass `rows` back as `within` to narrow the
+ * next query (when `canNarrow` allows it).
+ */
+export function searchWithRows<T>(
+  data: T[],
+  query: string,
+  config: SearchConfig<T>,
+  options?: SearchWithinOptions,
+): SearchWithRows<T> {
   const cfg = normaliseConfig(config);
   const rows = toRows(options?.within, data.length);
-  if (!query.trim()) return [];
+  if (!query.trim()) return NO_HITS();
   return runSearch(data, query, cfg, null, rows);
 }
 
@@ -314,8 +337,17 @@ export class ExSearch<T> {
    * hits of the previous query when `canNarrow` says that is exact).
    */
   search(query: string, options?: SearchWithinOptions): SearchResult<T>[] {
+    return this.searchWithRows(query, options).results;
+  }
+
+  /**
+   * `search()` that also returns where each result came from: `rows[i]` is the
+   * data index of `results[i]`. Pass `rows` back as `within` to narrow the next
+   * query when `canNarrow(prevQuery, nextQuery)` is `true`.
+   */
+  searchWithRows(query: string, options?: SearchWithinOptions): SearchWithRows<T> {
     const rows = toRows(options?.within, this._data.length);
-    if (!query.trim()) return [];
+    if (!query.trim()) return NO_HITS();
     return runSearch(this._data, query, this._config, this._wordIndex(), rows);
   }
 
@@ -355,14 +387,19 @@ export class ExSearch<T> {
    * rejects with an `AbortError`.
    */
   async searchAsync(query: string, options?: SearchOptions): Promise<SearchResult<T>[]> {
+    return (await this.searchAsyncWithRows(query, options)).results;
+  }
+
+  /** `searchAsync()` that also returns the data index of each result, as `searchWithRows()` does. */
+  async searchAsyncWithRows(query: string, options?: SearchOptions): Promise<SearchWithRows<T>> {
     const signal = options?.signal;
     throwIfAborted(signal);
     const within = options?.within === undefined ? undefined : { within: options.within };
     if (!this._config.useWorker || typeof Worker === 'undefined') {
-      return this.search(query, within);
+      return this.searchWithRows(query, within);
     }
     const rows = toRows(options?.within, this._data.length);
-    if (!query.trim()) return [];
+    if (!query.trim()) return NO_HITS();
 
     const cfg = this._config;
     const nKeys = cfg.keys.length;
@@ -388,7 +425,7 @@ export class ExSearch<T> {
       },
       signal,
     );
-    if (hits === null) return this.search(query, within); // Worker unusable: same answer, synchronously
+    if (hits === null) return this.searchWithRows(query, within); // Worker unusable: same answer, synchronously
     if (rows !== null) for (const hit of hits) hit.row = rows[hit.row];
     return buildResults(data, hits, cfg.sortAlgorithm);
   }

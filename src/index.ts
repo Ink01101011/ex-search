@@ -25,7 +25,7 @@
  *  an already ascending-sorted array and return its index (or -1).
  */
 
-export { search, canNarrow, createSearch, ExSearch } from './core/search';
+export { search, searchWithRows, canNarrow, createSearch, ExSearch } from './core/search';
 
 export { Scorer } from './core/scorer';
 
@@ -36,6 +36,7 @@ export type {
   SearchConfig,
   SearchOptions,
   SearchWithinOptions,
+  SearchWithRows,
   SearchKey,
   SearchResult,
   FieldMatch,
