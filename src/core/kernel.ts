@@ -294,7 +294,8 @@ export function createKernel() {
    * In `fuzzyMode: 'word'` the words come from `words` (built by
    * `buildWordIndex` over the same data and keys) or, when it is `null`, are
    * found on the fly. `rows`, when given, lists the only row indices to score
-   * (ascending, unique, each `< data.length`).
+   * (ascending, unique, each `< data.length`). `rowsOut`, when given, receives
+   * the data index of each returned result, in the same order.
    */
   function scoreRows<T>(
     data: T[],
@@ -302,6 +303,7 @@ export function createKernel() {
     config: KernelConfig,
     words: WordIndex | null,
     rows?: ArrayLike<number> | null,
+    rowsOut?: number[] | null,
   ): Array<Record<string, unknown>> {
     const keys = config.keys;
     const nKeys = keys.length;
@@ -417,6 +419,7 @@ export function createKernel() {
       out.score = total;
       out.fieldMatches = fieldMatches;
       results.push(out);
+      if (rowsOut != null) rowsOut.push(r);
     }
 
     return results;
