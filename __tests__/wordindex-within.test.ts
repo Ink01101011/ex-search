@@ -628,4 +628,15 @@ describe('searchWithRows', () => {
       restore();
     }
   });
+
+  it('ends a word where its separator starts, however long the separator is', () => {
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const, threshold: 0.2 };
+    const data = [{ name: 'ab  cd' }, { name: 'zz \t\n ab   ' }];
+    const s = createSearch(cfg).setData(data);
+    // 'ax' is 1 edit from 'ab' but 2 from 'ab ': a word that kept one unit of
+    // its separator would fall under the threshold.
+    const got = s.searchWithRows('ax');
+    expect(Array.from(got.rows)).toEqual([0, 1]);
+    expect(got.results.map((r) => r.score)).toEqual(searchWithRows(data, 'ax', cfg).results.map((r) => r.score));
+  });
 });
