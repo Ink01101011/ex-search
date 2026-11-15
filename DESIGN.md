@@ -97,11 +97,21 @@ thread and the Worker run identical code.
    of the value (maximal `\S+` runs, the same words `split(/\s+/)` gives); the
    best score wins. `ExSearch` builds a word index once per data / config
    version and drops it on `setData` / `updateConfig`. The index stores no
-   strings: `cells` (ascending `row × nKeys + key` of the cells with words),
-   `starts` (word range per listed cell) and `spans` (flat `[start, end)`
-   offsets into the case-normalised text; `Uint16Array` unless a value is
-   longer than 65 535 code units). A cell whose only word is the whole value
-   is left out, since tier 4 already scored the whole value. The matcher
+   strings, only offsets: `data` holds one entry per cell that has words (a
+   run of LEB128 varints: the entry's length, the first word's start, then
+   each further start minus the one before), and `blocks` lists every block
+   of 64 cells (`row × nKeys + key`) that holds such a cell: its number, the
+   `data` offset of its first entry and a 64-bit mask of its indexed cells.
+   A lookup finds the block (the next one, normally, since cells are visited
+   in ascending order; a binary search otherwise) and hops over at most 63
+   entries by their lengths. A word ends one code unit before the next one
+   starts; when more whitespace separates them, or follows the last word,
+   the entry stores how much. The cost is about 1 byte per word, 1 per cell
+   with words and 16 per block that has any; cells without words and blocks
+   without such cells cost nothing. The build grows its two arrays by
+   doubling instead of pre-sizing them. A cell
+   whose only word is the whole value is left out, since tier 4 already
+   scored the whole value. The matcher
    compares the query with `text[start, end)` in place, so a repeat query
    neither splits nor slices. The one-shot `search()` and the Worker find the
    words on the fly with the same splitter.

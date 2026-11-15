@@ -194,11 +194,12 @@ describe('word index (fuzzyMode word)', () => {
     expect(s.search('mali')[0].fieldMatches[0].matchType).toBe('fuzzy'); // case-sensitive now: 'mali' is 1 edit from 'Mali'
   });
 
-  it('uses 32-bit offsets when a value is longer than 65 535 code units', () => {
+  it('indexes words that start past 65 535 code units', () => {
     const k = createKernel();
     const long = 'a'.repeat(70000) + ' somchai';
     const idx = k.buildWordIndex((r) => [long, 'x y'][r], 2, 1, false)!;
-    expect(idx.spans).toBeInstanceOf(Uint32Array);
+    // 4 bytes follow: start 0, then the gap 70001 (doubled) as a three-byte varint. Then the entry of 'x y'.
+    expect(Array.from(idx.data)).toEqual([8, 0, 0xe2, 0xc5, 0x08, 4, 0, 4]);
     const data = [{ name: long }, { name: 'x y' }];
     const s = createSearch({ keys: [{ name: 'name', weight: 1 }], fuzzyMode: 'word' }).setData(data);
     expect(s.search('somchay')).toEqual(
@@ -207,14 +208,152 @@ describe('word index (fuzzyMode word)', () => {
     expect(s.search('somchay')).toHaveLength(1);
   });
 
-  it('stays compact: 16-bit offsets, single-word cells left out', () => {
+  it('stays compact: one byte per word start, single-word cells left out', () => {
     const k = createKernel();
     const texts = ['alpha', 'beta gamma', '  delta', 'eps'];
     const idx = k.buildWordIndex((r, key) => texts[r * 2 + key], 2, 2, false)!;
-    expect(idx.spans).toBeInstanceOf(Uint16Array);
-    expect(Array.from(idx.cells)).toEqual([1, 2]);
-    expect(Array.from(idx.starts)).toEqual([0, 2, 3]);
-    expect(Array.from(idx.spans)).toEqual([0, 4, 5, 10, 2, 7]);
+    // One block: number 0, entries from offset 0, cells 1 and 2 indexed.
+    expect(Array.from(idx.blocks)).toEqual([0, 0, 0b0110, 0]);
+    // 'beta gamma': 2 bytes follow, words at 0 and +5 after one space. '  delta': 1 byte follows, a word at 2.
+    expect(Array.from(idx.data)).toEqual([4, 0, 10, 2, 2]);
+    // One code unit of whitespace after the last word, and a separator of 3 code units before 'gamma'.
+    const flagged = k.buildWordIndex(() => 'beta \t gamma ', 1, 1, false)!;
+    expect(Array.from(flagged.data)).toEqual([9, 1, 0, 15, 3]);
+  });
+
+  it('keeps nothing when every cell is a single word', () => {
+    const k = createKernel();
+    const idx = k.buildWordIndex((r, key) => `w${r}x${key}`, 5000, 4, false)!;
+    expect(idx.blocks.byteLength + idx.data.byteLength).toBe(0);
+  });
+
+  it('takes at most 2 bytes per cell on name-like data (issue #22)', () => {
+    const k = createKernel();
+    const rows = 20000;
+    const text = (r: number, key: number) =>
+      key === 0 ? `Somchai Jaidee ${r}` : key === 1 ? `somchai.${r}@example.com` : key === 2 ? 'Hat Yai' : 'active';
+    const idx = k.buildWordIndex(text, rows, 4, false)!;
+    const bytes = idx.blocks.byteLength + idx.data.byteLength;
+    expect(bytes / (rows * 4)).toBeLessThanOrEqual(2);
+  });
+
+  it('finds the words of a cell wherever it sits in its block of 64, in any row subset', () => {
+    // 1 key, so cell === row. Every third row is multi-word; the rest are one word.
+    const rnd = prng(22);
+    const data: Array<{ id: number; name: string }> = [];
+    for (let r = 0; r < 400; r++) {
+      const pad = ' '.repeat(Math.floor(rnd() * 3));
+      data.push({ id: r, name: r % 3 === 0 ? `${pad}mr${r}  somchai\tjaidee ${pad}` : `solo${r}` });
+    }
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    const s = createSearch(cfg).setData(data);
+    const full = s.searchWithRows('somchay');
+    expect(Array.from(full.rows).sort((x, y) => x - y)).toEqual(data.filter((d) => d.id % 3 === 0).map((d) => d.id));
+    expect(full.results).toEqual(search(data, 'somchay', cfg));
+    for (let round = 0; round < 200; round++) {
+      const within: number[] = [];
+      for (let r = 0; r < 400; r++) if (rnd() < 0.05) within.push(r);
+      within.push(63, 64, 127, 128, 399);
+      const got = s.searchWithRows('somchay', { within });
+      const want = searchWithRows(data, 'somchay', cfg, { within });
+      expect(Array.from(got.rows)).toEqual(Array.from(want.rows));
+      expect(got.results).toEqual(want.results);
+    }
+  });
+
+  it('reads multi-byte word starts (63 / 64 / 127 / 128 / 16383 / 16384)', () => {
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    for (const gap of [
+      61,
+      62,
+      63,
+      64,
+      65,
+      126,
+      127,
+      128,
+      129,
+      8190,
+      8191,
+      8192,
+      8193,
+      16382,
+      16383,
+      16384,
+      16385,
+      2 ** 21 - 1,
+      2 ** 21,
+    ]) {
+      const data = [
+        { name: 'x'.repeat(gap - 1) + ' somchai ' + 'y'.repeat(gap) + '\n\njaidee  ' },
+        { name: 'solo' },
+        { name: 'q'.repeat(gap) + ' boonmee' },
+      ];
+      const s = createSearch(cfg).setData(data);
+      for (const q of ['somchay', 'jaidea', 'boonmea']) {
+        const got = s.searchWithRows(q);
+        const want = searchWithRows(data, q, cfg);
+        expect(Array.from(got.rows)).toEqual(Array.from(want.rows));
+        expect(got.results.map((r) => r.score)).toEqual(want.results.map((r) => r.score));
+        expect(got.rows.length).toBe(1);
+      }
+    }
+  });
+
+  it('costs only what the indexed cells cost when most rows are missing', () => {
+    const k = createKernel();
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    const sparse: Array<{ name: string }> = [];
+    sparse[70] = { name: 'mr somchai jaidee' };
+    sparse[250000] = { name: 'ms somchai boonmee' };
+    sparse[500000] = { name: 'dr somchai rakthai' };
+    const idx = k.buildWordIndex((r) => sparse[r]?.name, sparse.length, 1, false)!;
+    // Three blocks of 64 cells are listed, not the 7813 that span the array.
+    expect(Array.from(idx.blocks.filter((_, i) => i % 4 === 0))).toEqual([1, 3906, 7812]);
+    expect(idx.blocks.byteLength + idx.data.byteLength).toBeLessThan(64);
+    const s = createSearch(cfg).setData(sparse);
+    expect(s.search('somchay')).toEqual(search(sparse, 'somchay', cfg));
+    expect(s.search('somchay')).toHaveLength(3);
+  });
+
+  it('indexes dense rows that follow a long run of missing rows', () => {
+    const k = createKernel();
+    const lead: Array<{ name: string } | undefined> = [];
+    for (let r = 0; r < 6000; r++) lead.push(r < 5000 ? undefined : { name: `mr somchai ${r}` });
+    const idx = k.buildWordIndex((r) => lead[r]?.name, lead.length, 1, false)!;
+    expect(idx).not.toBeNull();
+    expect(idx.blocks.length / 4).toBe(16); // rows 5000..5999 fall in 16 blocks of 64
+    expect(idx.blocks[0]).toBe(5000 >>> 6);
+  });
+
+  it('stores the whitespace of padded and many-word values instead of rescanning it', () => {
+    const k = createKernel();
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    const many = Array.from({ length: 9000 }, (_, i) => `w${i}`).join('  ');
+    const data = [
+      { name: 'somchai'.padEnd(255, ' ') }, // a CHAR(255) column
+      { name: `${many}\tsomchai   ` }, // an entry longer than 16 383 bytes
+      { name: Array.from({ length: 70 }, (_, i) => `v${i}`).join(' ') + ' jaidee' }, // an entry longer than 127 bytes
+      { name: 'mr  somchai\u3000jaidee \n' },
+    ];
+    const idx = k.buildWordIndex((r) => data[r].name, data.length, 1, false)!;
+    // 'somchai' + 248 spaces: 3 bytes follow (the 248 as two bytes, then start 0).
+    expect(Array.from(idx.data.subarray(0, 4))).toEqual([7, 0xf8, 0x01, 0]);
+    const s = createSearch(cfg).setData(data);
+    for (const q of ['somchay', 'jaidea', 'w8999x', 'v69x', 'w0x']) {
+      const got = s.searchWithRows(q);
+      const want = searchWithRows(data, q, cfg);
+      expect(Array.from(got.rows)).toEqual(Array.from(want.rows));
+      expect(got.results.map((r) => r.score)).toEqual(want.results.map((r) => r.score));
+      expect(got.rows.length).toBeGreaterThan(0);
+    }
+    // Every row subset, in every order the wrapper allows, lands on the right entry.
+    for (let mask = 1; mask < 16; mask++) {
+      const within = [0, 1, 2, 3].filter((r) => mask & (1 << r));
+      for (const q of ['somchay', 'jaidea']) {
+        expect(s.searchWithRows(q, { within }).results).toEqual(searchWithRows(data, q, cfg, { within }).results);
+      }
+    }
   });
 });
 
@@ -418,5 +557,16 @@ describe('searchWithRows', () => {
     } finally {
       restore();
     }
+  });
+
+  it('ends a word where its separator starts, however long the separator is', () => {
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const, threshold: 0.2 };
+    const data = [{ name: 'ab  cd' }, { name: 'zz \t\n ab   ' }];
+    const s = createSearch(cfg).setData(data);
+    // 'ax' is 1 edit from 'ab' but 2 from 'ab ': a word that kept one unit of
+    // its separator would fall under the threshold.
+    const got = s.searchWithRows('ax');
+    expect(Array.from(got.rows)).toEqual([0, 1]);
+    expect(got.results.map((r) => r.score)).toEqual(searchWithRows(data, 'ax', cfg).results.map((r) => r.score));
   });
 });

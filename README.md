@@ -162,7 +162,7 @@ const people = createSearch<Person>({
 people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'Somchai')
 ```
 
-`ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 2.8 MB for 100 000 rows × 4 keys (400 000 words), against about 90 MB for one string array per value. Call `setData` again if you mutate items in place.
+`ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 0.65 MB for 100 000 rows × 4 keys (400 000 words, about 1.6 bytes per value), against about 90 MB for one string array per value. A value that is a single word with no whitespace around it is not stored at all. Call `setData` again if you mutate items in place.
 
 #### Searching only some rows — `within` and `canNarrow`
 
@@ -629,6 +629,10 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 | `Comparator<T>`       | `(a: T, b: T) => number`: three-way comparator for the precision searches                  |
 | `ScorerAPI`           | Shape of the exported `Scorer` object                                                      |
 
+## What's new in 2.1.1
+
+- **Smaller word index** — the `fuzzyMode: 'word'` index takes about 1.6 bytes per value instead of about 7 (0.65 MB instead of 2.8 MB at 100 000 rows × 4 keys), nothing for values that are a single word, and building it no longer allocates a large temporary buffer. Results are unchanged.
+
 ## What's new in 2.1.0
 
 All additive; results of existing calls are unchanged.
@@ -638,7 +642,7 @@ All additive; results of existing calls are unchanged.
 - **`canNarrow(prevQuery, nextQuery)`** — tells when narrowing to the previous hits is provably exact.
 - **`searchWithRows` / `searchAsyncWithRows`** — the results plus the data index of each one, ready to pass back as `within`.
 
-The same APIs ship on the 1.x line in 1.2.1.
+The same APIs ship on the 1.x line in 1.2.1, and the smaller word index in 1.2.2.
 
 ## Upgrading from 1.x
 
