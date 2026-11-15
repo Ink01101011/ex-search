@@ -162,7 +162,7 @@ const people = createSearch<Person>({
 people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'Somchai')
 ```
 
-`ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 0.6 MB for 100 000 rows × 4 keys (400 000 words, about 1.6 bytes per value), against about 90 MB for one string array per value. A value that is a single word costs one bit. Call `setData` again if you mutate items in place.
+`ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 0.65 MB for 100 000 rows × 4 keys (400 000 words, about 1.6 bytes per value), against about 90 MB for one string array per value. A value that is a single word is not stored at all. Call `setData` again if you mutate items in place.
 
 #### Searching only some rows — `within` and `canNarrow`
 
@@ -631,7 +631,7 @@ Use `ex-search/types` when you only need type annotations — for example, in a 
 
 ## What's new in 2.1.1
 
-- **Smaller word index** — the `fuzzyMode: 'word'` index takes about 1.6 bytes per value instead of about 7 (0.6 MB instead of 2.8 MB at 100 000 rows × 4 keys), and building it no longer allocates a large temporary buffer. Results are unchanged.
+- **Smaller word index** — the `fuzzyMode: 'word'` index takes about 1.6 bytes per value instead of about 7 (0.65 MB instead of 2.8 MB at 100 000 rows × 4 keys), nothing for values that are a single word, and building it no longer allocates a large temporary buffer. Results are unchanged.
 
 ## What's new in 2.1.0
 

@@ -51,7 +51,7 @@ const repeats = typed.map((q) => time(() => s.search(q)));
 const k = createKernel();
 const idx = k.buildWordIndex((r, c) => data[r][keys[c].name], ROWS, keys.length, false);
 if (idx === null) throw new Error('word index not built');
-const bytes = idx.bits.byteLength + idx.blocks.byteLength + idx.data.byteLength;
+const bytes = idx.blocks.byteLength + idx.data.byteLength;
 
 // The previous cache: one string[] per (row, key).
 const g = globalThis as { gc?: () => void };
@@ -74,6 +74,6 @@ console.log(
   `index build alone      : ${time(() => k.buildWordIndex((r, c) => data[r][keys[c].name], ROWS, keys.length, false)).toFixed(1)} ms`,
 );
 console.log(
-  `word index             : ${(bytes / 1e6).toFixed(2)} MB (${(bytes / (ROWS * keys.length)).toFixed(2)} B/cell: bits ${idx.bits.byteLength}, blocks ${idx.blocks.byteLength}, data ${idx.data.byteLength})`,
+  `word index             : ${(bytes / 1e6).toFixed(2)} MB (${(bytes / (ROWS * keys.length)).toFixed(2)} B/cell: blocks ${idx.blocks.byteLength}, data ${idx.data.byteLength})`,
 );
 console.log(`string[] cache (old)   : ${stringCacheMB}`);

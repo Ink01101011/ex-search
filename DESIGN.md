@@ -97,18 +97,19 @@ thread and the Worker run identical code.
    of the value (maximal `\S+` runs, the same words `split(/\s+/)` gives); the
    best score wins. `ExSearch` builds a word index once per data / config
    version and drops it on `setData` / `updateConfig`. The index stores no
-   strings, only where each word starts: `bits` (one bit per
-   `row × nKeys + key` cell, set when the cell has words), `data` (per such
-   cell, LEB128 varints: the word count, the first word's start, then each
-   start minus the one before) and `blocks` (the `data` offset of every 64th
-   cell, so a lookup walks at most 63 entries; cells are visited in ascending
-   order, so it normally walks none). A word ends where the whitespace before
-   the next word begins. That is one code unit before the next start when a
-   single whitespace character separates them; one spare bit in each varint
-   marks the other case (a longer separator, or whitespace after the last
-   word), where the kernel steps back over the whitespace. The cost is about
-   1 byte per word plus 1 per cell with words, and the build grows its arrays
-   by doubling instead of pre-sizing them. A cell
+   strings, only offsets: `data` holds one entry per cell that has words (a
+   run of LEB128 varints: the entry's length, the first word's start, then
+   each further start minus the one before), and `blocks` lists every block
+   of 64 cells (`row × nKeys + key`) that holds such a cell: its number, the
+   `data` offset of its first entry and a 64-bit mask of its indexed cells.
+   A lookup finds the block (the next one, normally, since cells are visited
+   in ascending order; a binary search otherwise) and hops over at most 63
+   entries by their lengths. A word ends one code unit before the next one
+   starts; when more whitespace separates them, or follows the last word,
+   the entry stores how much. The cost is about 1 byte per word, 1 per cell
+   with words and 16 per block that has any; cells without words and blocks
+   without such cells cost nothing. The build grows its two arrays by
+   doubling instead of pre-sizing them. A cell
    whose only word is the whole value is left out, since tier 4 already
    scored the whole value. The matcher
    compares the query with `text[start, end)` in place, so a repeat query
