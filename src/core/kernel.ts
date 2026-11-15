@@ -2,17 +2,27 @@ import type { MatchType } from '../types';
 
 /**
  * Compact word index for `fuzzyMode: 'word'`, built once per data version.
- * Words are stored as offsets into each cell's case-normalised text, never as
- * substrings. A cell is `row * nKeys + key`. Cells whose only word is the whole
- * value are left out (the whole value is already scored by the fuzzy tier).
+ * A cell is `row * nKeys + key`. Only the start offset of each word is kept
+ * (into the cell's case-normalised text, never a substring); a word ends where
+ * the whitespace before the next word begins, which is one code unit before
+ * that word unless the entry says otherwise. Cells whose only word is the
+ * whole value are left out (the whole value is already scored by the fuzzy
+ * tier), so they cost one bit.
  */
 export interface WordIndex {
-  /** Ascending ids of the cells that have at least one indexed word. */
-  cells: Uint32Array;
-  /** Words of `cells[i]` are words `starts[i]` (inclusive) to `starts[i + 1]` (exclusive). */
-  starts: Uint32Array;
-  /** Flat `[start, end)` offset pairs: word `w` is `text.slice(spans[2w], spans[2w + 1])`. */
-  spans: Uint16Array | Uint32Array;
+  /** Bit `c & 31` of `bits[c >>> 5]` is set when cell `c` has indexed words. Cells past the end have none. */
+  bits: Uint32Array;
+  /** `blocks[b]` is the offset in `data` of the entry of the first indexed cell at or after cell `64 * b`. */
+  blocks: Uint32Array;
+  /**
+   * The entries of the indexed cells, in ascending cell order. An entry is a
+   * run of LEB128 varints. First `2 * words + t`, where `t` is 1 when
+   * whitespace follows the last word. Then the start of the first word. Then,
+   * per further word, `2 * gap + s`: `gap` is its start minus the start of the
+   * word before it, and `s` is 0 when exactly one whitespace code unit
+   * separates the two (so the earlier word ends at `start - 1`), else 1.
+   */
+  data: Uint8Array;
 }
 
 export interface KernelKey {
@@ -276,10 +286,13 @@ export function createKernel() {
   /**
    * Builds the word index of every (row, key) cell. `getText` follows the
    * `scoreRows` contract; offsets refer to the text as `scoreRows` normalises
-   * it. They are stored as 16-bit integers when every text fits, else 32-bit.
-   * Returns `null` when the cell ids (`row * nKeys + key`, 32-bit) could not
-   * hold every cell: the caller then scores without an index, which finds the
-   * same words on the fly.
+   * it. The arrays grow by doubling from empty, so the build never holds more
+   * than about three times what it returns.
+   * Returns `null` when the index cannot be used: the cell ids
+   * (`row * nKeys + key`) or the entry offsets do not fit in 32 bits, or
+   * nearly every row is skipped (a sparse array), where a bit per cell would
+   * cost more than the words. The caller then scores without an index, which
+   * finds the same words on the fly.
    */
   function buildWordIndex(
     getText: (row: number, key: number) => string | null | undefined,
@@ -290,20 +303,20 @@ export function createKernel() {
     const total = nRows * nKeys;
     if (!(total <= 0xffffffff)) return null;
 
-    // Pre-sized for the common case so the typed arrays rarely have to grow.
-    const cap = (total < 1 << 20 ? total : 1 << 20) + 1;
-    let cells = new Uint32Array(cap);
-    let starts = new Uint32Array(cap + 1);
-    let spans = new Uint32Array(Math.min((cap - 1) * 6 + 16, 1 << 23));
-    let nCells = 0;
-    let nSpans = 0;
-    let maxLen = 0;
+    let bits = new Uint32Array(0);
+    let blocks = new Uint32Array(0);
+    let data = new Uint8Array(0);
+    let nBits = 0; // words of `bits` in use
+    let nBlocks = 0; // entries of `blocks` in use
+    let n = 0; // bytes of `data` in use
+    let visited = 0; // cells of the rows that were not skipped
     const scratch: number[] = [];
 
     for (let r = 0; r < nRows; r++) {
       for (let k = 0; k < nKeys; k++) {
         const raw = getText(r, k);
         if (raw === undefined && k === 0) break;
+        visited++;
         if (typeof raw !== 'string') continue;
         // Lower-casing keeps every offset and every whitespace position in place
         // except for U+0130, which grows to two code units. So the words of the
@@ -311,37 +324,71 @@ export function createKernel() {
         // with U+0130 needs the real thing here (scoring lower-cases it again).
         const text = caseSensitive || raw.indexOf('\u0130') === -1 ? raw : raw.toLowerCase();
         scratch.length = 0;
-        if (wordSpans(text, scratch) === 0) continue;
+        const count = wordSpans(text, scratch);
+        if (count === 0) continue;
 
-        if (nCells + 1 >= cells.length) {
-          cells = grow(cells, cells.length * 2);
-          starts = grow(starts, cells.length + 1);
+        const cell = r * nKeys + k;
+        // `bits` and `blocks` cover every cell up to this one: 3 bits per cell.
+        // That is only worth it while the rows are mostly there.
+        if (cell > 4096 + visited * 64) return null;
+        // A varint of a value below 2^32 takes at most 5 bytes.
+        const need = n + (count + 1) * 5;
+        if (need > 0xffffffff) return null;
+        if (need > data.length) {
+          const bigger = new Uint8Array(Math.max(need, data.length * 2, 256));
+          bigger.set(data.subarray(0, n));
+          data = bigger;
         }
-        if (nSpans + scratch.length > spans.length) {
-          spans = grow(spans, Math.max(spans.length * 2, nSpans + scratch.length));
+
+        const word = cell >>> 5;
+        if (word >= bits.length) bits = grow(bits, Math.max(word + 1, bits.length * 2, 8));
+        bits[word] |= 1 << (cell & 31);
+        nBits = word + 1;
+
+        const block = cell >>> 6;
+        if (block >= blocks.length) blocks = grow(blocks, Math.max(block + 1, blocks.length * 2, 8));
+        while (nBlocks <= block) blocks[nBlocks++] = n;
+
+        n = writeVarint(data, n, count * 2 + (scratch[2 * count - 1] === text.length ? 0 : 1));
+        n = writeVarint(data, n, scratch[0]);
+        for (let i = 1; i < count; i++) {
+          const start = scratch[2 * i];
+          n = writeVarint(data, n, (start - scratch[2 * i - 2]) * 2 + (start - scratch[2 * i - 1] === 1 ? 0 : 1));
         }
-        for (let i = 0; i < scratch.length; i++) spans[nSpans + i] = scratch[i];
-        nSpans += scratch.length;
-        cells[nCells++] = r * nKeys + k;
-        starts[nCells] = nSpans / 2;
-        if (text.length > maxLen) maxLen = text.length;
       }
     }
 
-    let packed: Uint16Array | Uint32Array;
-    if (maxLen <= 0xffff) {
-      packed = new Uint16Array(nSpans);
-      packed.set(spans.subarray(0, nSpans));
-    } else {
-      packed = spans.slice(0, nSpans);
-    }
-    return { cells: cells.slice(0, nCells), starts: starts.slice(0, nCells + 1), spans: packed };
+    return { bits: bits.slice(0, nBits), blocks: blocks.slice(0, nBlocks), data: data.slice(0, n) };
   }
 
   function grow(a: Uint32Array, size: number): Uint32Array<ArrayBuffer> {
     const b = new Uint32Array(size);
     b.set(a);
     return b;
+  }
+
+  /** Writes `v` (an integer in `[0, 2^32)`) at `buf[at]` as a LEB128 varint and returns the offset after it. */
+  function writeVarint(buf: Uint8Array, at: number, v: number): number {
+    while (v > 127) {
+      buf[at++] = (v & 127) | 128;
+      v >>>= 7;
+    }
+    buf[at++] = v;
+    return at;
+  }
+
+  // Read offset of `readVarint`. The kernel is synchronous, so one is enough.
+  let vp = 0;
+
+  /** Reads the varint at `buf[vp]` and moves `vp` past it. */
+  function readVarint(buf: Uint8Array): number {
+    let b = buf[vp++];
+    let v = b & 127;
+    for (let mul = 128; b > 127; mul *= 128) {
+      b = buf[vp++];
+      v += (b & 127) * mul;
+    }
+    return v;
   }
 
   const MATCH_EXACT: MatchType = 'exact';
@@ -398,8 +445,12 @@ export function createKernel() {
     const live: number[] = [];
     /** Fuzzy score of a word at distance `d` (0 when beyond `max`). */
     const wordScore = (d: number, len: number): number => (d <= max ? (1 - d / (len > qLen ? len : qLen)) * 55 : 0);
-    // Position in `words.cells`; cells are visited in ascending order.
-    let cursor = 0;
+    const bits = words === null ? new Uint32Array(0) : words.bits;
+    const blocks = words === null ? bits : words.blocks;
+    const data = words === null ? new Uint8Array(0) : words.data;
+    // `pos` is the offset in `data` of the entry of the first indexed cell at or after cell `at`.
+    let at = 0;
+    let pos = 0;
     const count = rows == null ? nRows : rows.length;
 
     for (let i = 0; i < count; i++) {
@@ -439,30 +490,64 @@ export function createKernel() {
                   if (s > ws) ws = s;
                 }
               } else {
-                // Lower bound of this cell in the ascending `cells`: rows are
-                // visited in ascending order, so it is usually at or just past
-                // `cursor`; fall back to a binary search after a short walk.
                 const cell = r * nKeys + k;
-                const cells = words.cells;
-                const nc = cells.length;
-                let lo = cursor === 0 || (cursor <= nc && cells[cursor - 1] < cell) ? cursor : 0;
-                for (let step = 0; step < 4 && lo < nc && cells[lo] < cell; step++) lo++;
-                if (lo < nc && cells[lo] < cell) {
-                  let hi = nc;
-                  while (lo < hi) {
-                    const mid = (lo + hi) >>> 1;
-                    if (cells[mid] < cell) lo = mid + 1;
-                    else hi = mid;
+                const word = cell >>> 5;
+                if (word < bits.length && (bits[word] >>> (cell & 31)) & 1) {
+                  // Find this cell's entry. Cells are visited in ascending
+                  // order, so it is usually the one at `pos`; otherwise walk
+                  // from the start of its block of 64 cells.
+                  const block = cell >>> 6;
+                  if (cell < at || at >>> 6 !== block || at > 0xffffffff) {
+                    at = block * 64;
+                    pos = blocks[block];
                   }
-                }
-                cursor = lo;
-                if (lo < nc && cells[lo] === cell) {
-                  const spans = words.spans;
-                  const to = words.starts[lo + 1];
-                  for (let w = words.starts[lo]; w < to; w++) {
-                    const s = wordScore(match(text, spans[2 * w], spans[2 * w + 1]), spans[2 * w + 1] - spans[2 * w]);
+                  // Varints are read in place; only one of two bytes or more
+                  // (a count or a gap above 127) goes through `readVarint`.
+                  let p = pos;
+                  for (; at < cell; at++) {
+                    if ((bits[at >>> 5] >>> (at & 31)) & 1) {
+                      // Skip an entry: its head, then one varint per word.
+                      vp = p;
+                      let left = readVarint(data) >>> 1;
+                      p = vp;
+                      while (left > 0 && p < data.length) if (data[p++] < 128) left--;
+                    }
+                  }
+                  let head = data[p++];
+                  if (head > 127) {
+                    vp = p - 1;
+                    head = readVarint(data);
+                    p = vp;
+                  }
+                  let start = data[p++];
+                  if (start > 127) {
+                    vp = p - 1;
+                    start = readVarint(data);
+                    p = vp;
+                  }
+                  for (let w = head >>> 1; w > 1; w--) {
+                    let gap = data[p++];
+                    if (gap > 127) {
+                      vp = p - 1;
+                      gap = readVarint(data);
+                      p = vp;
+                    }
+                    // The word ends where the whitespace before the next word
+                    // begins: one code unit back, or further when flagged.
+                    const next = start + (gap >>> 1);
+                    let end = next - 1;
+                    if (gap & 1) while (end > start && isSpace(text.charCodeAt(end - 1))) end--;
+                    const s = wordScore(match(text, start, end), end - start);
                     if (s > ws) ws = s;
+                    start = next;
                   }
+                  // The last word runs to the end, or to the trailing whitespace when flagged.
+                  let end = text.length;
+                  if (head & 1) while (end > start && isSpace(text.charCodeAt(end - 1))) end--;
+                  const s = wordScore(match(text, start, end), end - start);
+                  if (s > ws) ws = s;
+                  at = cell + 1;
+                  pos = p;
                 }
               }
               if (ws > score) {

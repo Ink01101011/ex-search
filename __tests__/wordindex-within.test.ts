@@ -194,11 +194,12 @@ describe('word index (fuzzyMode word)', () => {
     expect(s.search('mali')[0].fieldMatches[0].matchType).toBe('fuzzy'); // case-sensitive now: 'mali' is 1 edit from 'Mali'
   });
 
-  it('uses 32-bit offsets when a value is longer than 65 535 code units', () => {
+  it('indexes words that start past 65 535 code units', () => {
     const k = createKernel();
     const long = 'a'.repeat(70000) + ' somchai';
     const idx = k.buildWordIndex((r) => [long, 'x y'][r], 2, 1, false)!;
-    expect(idx.spans).toBeInstanceOf(Uint32Array);
+    // 2 words, start 0, then the gap 70001 (doubled) as a three-byte varint; then the entry of 'x y'.
+    expect(Array.from(idx.data)).toEqual([4, 0, 0xe2, 0xc5, 0x08, 4, 0, 4]);
     const data = [{ name: long }, { name: 'x y' }];
     const s = createSearch({ keys: [{ name: 'name', weight: 1 }], fuzzyMode: 'word' }).setData(data);
     expect(s.search('somchay')).toEqual(
@@ -207,14 +208,112 @@ describe('word index (fuzzyMode word)', () => {
     expect(s.search('somchay')).toHaveLength(1);
   });
 
-  it('stays compact: 16-bit offsets, single-word cells left out', () => {
+  it('stays compact: one byte per word start, single-word cells left out', () => {
     const k = createKernel();
     const texts = ['alpha', 'beta gamma', '  delta', 'eps'];
     const idx = k.buildWordIndex((r, key) => texts[r * 2 + key], 2, 2, false)!;
-    expect(idx.spans).toBeInstanceOf(Uint16Array);
-    expect(Array.from(idx.cells)).toEqual([1, 2]);
-    expect(Array.from(idx.starts)).toEqual([0, 2, 3]);
-    expect(Array.from(idx.spans)).toEqual([0, 4, 5, 10, 2, 7]);
+    expect(Array.from(idx.bits)).toEqual([0b0110]);
+    expect(Array.from(idx.blocks)).toEqual([0]);
+    // 'beta gamma': 2 words, at 0 and +5 after one space. '  delta': 1 word at 2.
+    expect(Array.from(idx.data)).toEqual([4, 0, 10, 2, 2]);
+    // Flags: whitespace after the last word, and a separator longer than one code unit.
+    const flagged = k.buildWordIndex(() => 'beta \t gamma ', 1, 1, false)!;
+    expect(Array.from(flagged.data)).toEqual([5, 0, 15]);
+  });
+
+  it('keeps nothing when every cell is a single word', () => {
+    const k = createKernel();
+    const idx = k.buildWordIndex((r, key) => `w${r}x${key}`, 5000, 4, false)!;
+    expect(idx.bits.byteLength + idx.blocks.byteLength + idx.data.byteLength).toBe(0);
+  });
+
+  it('takes at most 2 bytes per cell on name-like data (issue #22)', () => {
+    const k = createKernel();
+    const rows = 20000;
+    const text = (r: number, key: number) =>
+      key === 0 ? `Somchai Jaidee ${r}` : key === 1 ? `somchai.${r}@example.com` : key === 2 ? 'Hat Yai' : 'active';
+    const idx = k.buildWordIndex(text, rows, 4, false)!;
+    const bytes = idx.bits.byteLength + idx.blocks.byteLength + idx.data.byteLength;
+    expect(bytes / (rows * 4)).toBeLessThanOrEqual(2);
+  });
+
+  it('finds the words of a cell wherever it sits in its block of 64, in any row subset', () => {
+    // 1 key, so cell === row. Every third row is multi-word; the rest are one word.
+    const rnd = prng(22);
+    const data: Array<{ id: number; name: string }> = [];
+    for (let r = 0; r < 400; r++) {
+      const pad = ' '.repeat(Math.floor(rnd() * 3));
+      data.push({ id: r, name: r % 3 === 0 ? `${pad}mr${r}  somchai\tjaidee ${pad}` : `solo${r}` });
+    }
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    const s = createSearch(cfg).setData(data);
+    const full = s.searchWithRows('somchay');
+    expect(Array.from(full.rows).sort((x, y) => x - y)).toEqual(data.filter((d) => d.id % 3 === 0).map((d) => d.id));
+    expect(full.results).toEqual(search(data, 'somchay', cfg));
+    for (let round = 0; round < 200; round++) {
+      const within: number[] = [];
+      for (let r = 0; r < 400; r++) if (rnd() < 0.05) within.push(r);
+      within.push(63, 64, 127, 128, 399);
+      const got = s.searchWithRows('somchay', { within });
+      const want = searchWithRows(data, 'somchay', cfg, { within });
+      expect(Array.from(got.rows)).toEqual(Array.from(want.rows));
+      expect(got.results).toEqual(want.results);
+    }
+  });
+
+  it('reads multi-byte word starts (63 / 64 / 127 / 128 / 16383 / 16384)', () => {
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    for (const gap of [
+      61,
+      62,
+      63,
+      64,
+      65,
+      126,
+      127,
+      128,
+      129,
+      8190,
+      8191,
+      8192,
+      8193,
+      16382,
+      16383,
+      16384,
+      16385,
+      2 ** 21 - 1,
+      2 ** 21,
+    ]) {
+      const data = [
+        { name: 'x'.repeat(gap - 1) + ' somchai ' + 'y'.repeat(gap) + '\n\njaidee  ' },
+        { name: 'solo' },
+        { name: 'q'.repeat(gap) + ' boonmee' },
+      ];
+      const s = createSearch(cfg).setData(data);
+      for (const q of ['somchay', 'jaidea', 'boonmea']) {
+        const got = s.searchWithRows(q);
+        const want = searchWithRows(data, q, cfg);
+        expect(Array.from(got.rows)).toEqual(Array.from(want.rows));
+        expect(got.results.map((r) => r.score)).toEqual(want.results.map((r) => r.score));
+        expect(got.rows.length).toBe(1);
+      }
+    }
+  });
+
+  it('gives up the index, not the results, when nearly every row is a hole', () => {
+    const k = createKernel();
+    const sparse: Array<{ name: string }> = [];
+    sparse[500000] = { name: 'mr somchai jaidee' };
+    const text = (r: number) => (sparse[r] === undefined ? undefined : sparse[r].name);
+    expect(k.buildWordIndex(text, sparse.length, 1, false)).toBeNull();
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    const s = createSearch(cfg).setData(sparse);
+    expect(s.search('somchay')).toEqual(search(sparse, 'somchay', cfg));
+    expect(s.search('somchay')).toHaveLength(1);
+    // A hole here and there is fine.
+    const holey = Array.from({ length: 3000 }, (_, r) => (r % 2 ? { name: `mr somchai ${r}` } : undefined));
+    const idx = k.buildWordIndex((r) => holey[r]?.name, holey.length, 1, false);
+    expect(idx).not.toBeNull();
   });
 });
 
