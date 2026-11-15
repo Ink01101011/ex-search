@@ -196,8 +196,8 @@ describe('word index (fuzzyMode word)', () => {
     const k = createKernel();
     const long = 'a'.repeat(70000) + ' somchai';
     const idx = k.buildWordIndex([{ n: long }, { n: 'x y' }], [{ name: 'n', weight: 1 }], false)!;
-    // 2 words, start 0, then the gap 70001 (doubled) as a three-byte varint; then the entry of 'x y'.
-    expect(Array.from(idx.data)).toEqual([4, 0, 0xe2, 0xc5, 0x08, 4, 0, 4]);
+    // 4 bytes follow: start 0, then the gap 70001 (doubled) as a three-byte varint. Then the entry of 'x y'.
+    expect(Array.from(idx.data)).toEqual([8, 0, 0xe2, 0xc5, 0x08, 4, 0, 4]);
     const data = [{ name: long }, { name: 'x y' }];
     const s = createSearch({ keys: [{ name: 'name', weight: 1 }], fuzzyMode: 'word' }).setData(data);
     expect(s.search('somchay')).toEqual(
@@ -221,13 +221,13 @@ describe('word index (fuzzyMode word)', () => {
       pq,
       false,
     )!;
-    expect(Array.from(idx.bits)).toEqual([0b0110]);
-    expect(Array.from(idx.blocks)).toEqual([0]);
-    // 'beta gamma': 2 words, at 0 and +5 after one space. '  delta': 1 word at 2.
+    // One block: number 0, entries from offset 0, cells 1 and 2 indexed.
+    expect(Array.from(idx.blocks)).toEqual([0, 0, 0b0110, 0]);
+    // 'beta gamma': 2 bytes follow, words at 0 and +5 after one space. '  delta': 1 byte follows, a word at 2.
     expect(Array.from(idx.data)).toEqual([4, 0, 10, 2, 2]);
-    // Flags: whitespace after the last word, and a separator longer than one code unit.
+    // One code unit of whitespace after the last word, and a separator of 3 code units before 'gamma'.
     const flagged = k.buildWordIndex([{ p: 'beta \t gamma ' }], [pq[0]], false)!;
-    expect(Array.from(flagged.data)).toEqual([5, 0, 15]);
+    expect(Array.from(flagged.data)).toEqual([9, 1, 0, 15, 3]);
   });
 
   it('keeps nothing when every cell is a single word', () => {
@@ -235,7 +235,7 @@ describe('word index (fuzzyMode word)', () => {
     const data = Array.from({ length: 5000 }, (_, r) => ({ p: `w${r}p`, q: `w${r}q`, n: r, missing: null }));
     const keys = ['p', 'q', 'n', 'missing'].map((name) => ({ name, weight: 1 }));
     const idx = k.buildWordIndex(data, keys, false)!;
-    expect(idx.bits.byteLength + idx.blocks.byteLength + idx.data.byteLength).toBe(0);
+    expect(idx.blocks.byteLength + idx.data.byteLength).toBe(0);
   });
 
   it('takes at most 2 bytes per cell on name-like data (issue #22)', () => {
@@ -249,7 +249,7 @@ describe('word index (fuzzyMode word)', () => {
     }));
     const keys = ['name', 'email', 'city', 'status'].map((name) => ({ name, weight: 1 }));
     const idx = k.buildWordIndex(data, keys, false)!;
-    const bytes = idx.bits.byteLength + idx.blocks.byteLength + idx.data.byteLength;
+    const bytes = idx.blocks.byteLength + idx.data.byteLength;
     expect(bytes / (rows * 4)).toBeLessThanOrEqual(2);
   });
 
@@ -316,21 +316,63 @@ describe('word index (fuzzyMode word)', () => {
     }
   });
 
-  it('gives up the index when nearly every row is missing', () => {
+  it('costs only what the indexed cells cost when most rows are missing', () => {
     const k = createKernel();
     const keys = [{ name: 'name', weight: 1 }];
-    const sparse: Array<{ name: string }> = [];
-    sparse[500000] = { name: 'mr somchai jaidee' };
-    expect(k.buildWordIndex(sparse, keys, false)).toBeNull();
-    // The one row that is there is still found, without an index.
     const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    const sparse: Array<{ name: string }> = [];
+    sparse[70] = { name: 'mr somchai jaidee' };
+    sparse[250000] = { name: 'ms somchai boonmee' };
+    sparse[500000] = { name: 'dr somchai rakthai' };
+    const idx = k.buildWordIndex(sparse, keys, false)!;
+    // Three blocks of 64 cells are listed, not the 7813 that span the array.
+    expect(Array.from(idx.blocks.filter((_, i) => i % 4 === 0))).toEqual([1, 3906, 7812]);
+    expect(idx.blocks.byteLength + idx.data.byteLength).toBeLessThan(64);
     const s = createSearch(cfg).setData(sparse);
-    const within = [500000];
+    const within = [70, 250000, 500000];
     expect(s.search('somchay', { within })).toEqual(search(sparse, 'somchay', cfg, { within }));
-    expect(s.search('somchay', { within })).toHaveLength(1);
-    // A missing row here and there is fine.
-    const holey = Array.from({ length: 3000 }, (_, r) => (r % 2 ? { name: `mr somchai ${r}` } : null));
-    expect(k.buildWordIndex(holey, keys, false)).not.toBeNull();
+    expect(s.search('somchay', { within })).toHaveLength(3);
+  });
+
+  it('indexes dense rows that follow a long run of missing rows', () => {
+    const k = createKernel();
+    const keys = [{ name: 'name', weight: 1 }];
+    const lead: Array<{ name: string } | null> = [];
+    for (let r = 0; r < 6000; r++) lead.push(r < 5000 ? null : { name: `mr somchai ${r}` });
+    const idx = k.buildWordIndex(lead, keys, false)!;
+    expect(idx).not.toBeNull();
+    expect(idx.blocks.length / 4).toBe(16); // rows 5000..5999 fall in 16 blocks of 64
+    expect(idx.blocks[0]).toBe(5000 >>> 6);
+  });
+
+  it('stores the whitespace of padded and many-word values instead of rescanning it', () => {
+    const k = createKernel();
+    const cfg = { keys: [{ name: 'name' as const, weight: 1 }], fuzzyMode: 'word' as const };
+    const many = Array.from({ length: 9000 }, (_, i) => `w${i}`).join('  ');
+    const data = [
+      { name: 'somchai'.padEnd(255, ' ') }, // a CHAR(255) column
+      { name: `${many}\tsomchai   ` }, // an entry longer than 16 383 bytes
+      { name: Array.from({ length: 70 }, (_, i) => `v${i}`).join(' ') + ' jaidee' }, // an entry longer than 127 bytes
+      { name: 'mr  somchai\u3000jaidee \n' },
+    ];
+    const idx = k.buildWordIndex(data, [{ name: 'name', weight: 1 }], false)!;
+    // 'somchai' + 248 spaces: 3 bytes follow (the 248 as two bytes, then start 0).
+    expect(Array.from(idx.data.subarray(0, 4))).toEqual([7, 0xf8, 0x01, 0]);
+    const s = createSearch(cfg).setData(data);
+    for (const q of ['somchay', 'jaidea', 'w8999x', 'v69x', 'w0x']) {
+      const got = s.searchWithRows(q);
+      const want = searchWithRows(data, q, cfg);
+      expect(Array.from(got.rows)).toEqual(Array.from(want.rows));
+      expect(got.results.map((r) => r.score)).toEqual(want.results.map((r) => r.score));
+      expect(got.rows.length).toBeGreaterThan(0);
+    }
+    // Every row subset, in every order the wrapper allows, lands on the right entry.
+    for (let mask = 1; mask < 16; mask++) {
+      const within = [0, 1, 2, 3].filter((r) => mask & (1 << r));
+      for (const q of ['somchay', 'jaidea']) {
+        expect(s.searchWithRows(q, { within }).results).toEqual(searchWithRows(data, q, cfg, { within }).results);
+      }
+    }
   });
 });
 

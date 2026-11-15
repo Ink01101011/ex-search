@@ -162,7 +162,7 @@ const people = createSearch<Person>({
 people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'Somchai')
 ```
 
-`ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 0.6 MB for 100 000 rows × 4 keys (400 000 words, about 1.6 bytes per value), against about 90 MB for one string array per value. A value that is a single word costs one bit. Call `setData` again if you mutate items in place.
+`ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 0.65 MB for 100 000 rows × 4 keys (400 000 words, about 1.6 bytes per value), against about 90 MB for one string array per value. A value that is a single word is not stored at all. Call `setData` again if you mutate items in place.
 
 #### Searching only some rows — `within` and `canNarrow`
 
