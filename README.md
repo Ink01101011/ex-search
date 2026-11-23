@@ -164,6 +164,10 @@ people.search('Somchay'); // matches 'Somchai Jaidee' (distance 1 to the word 'S
 
 `ExSearch` splits each value into words once (on the first search after `setData` / `updateConfig`) and reuses the result for every keystroke, so a repeat query does no splitting. Words are kept as offsets into the value, not as strings: about 0.65 MB for 100 000 rows × 4 keys (400 000 words, about 1.6 bytes per value), against about 90 MB for one string array per value. A value that is a single word with no whitespace around it is not stored at all. Call `setData` again if you mutate items in place.
 
+#### Repeated values
+
+When a key holds the same values again and again (a status, a city, a category), `ExSearch` scores each distinct value once per query instead of once per row. It finds such keys on the first search after `setData` / `updateConfig`, for data of at least 1 024 rows, and keeps one small id per row for them: about 10 ms instead of about 31 ms for a warm `fuzzyMode: 'word'` search over 100 000 rows × 4 keys of 2–3 words. Results are the same, and a value changed in place is still scored as what it now is. Nothing to configure; the one-shot `search()` does not do this.
+
 #### Searching only some rows — `within` and `canNarrow`
 
 Pass `within` (row indices into the data, an array or typed array) to score only those rows. Each row is scored with the same rules as a full search, so the result equals a full search filtered to those rows. Field values and getters must return the same text every time they are read, because word mode reads each field once more to build its index. `within` must be an array-like whose `length` is a number from 0 to 2³²−1; anything else throws a `TypeError`.

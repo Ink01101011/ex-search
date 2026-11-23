@@ -1,6 +1,6 @@
 import { radixSort, timSort } from 'exsorted';
 import type { SearchConfig, SearchResult, SearchOptions, SearchWithinOptions, SearchWithRows } from '../types';
-import { createKernel, type KernelConfig, type KernelHit, type WordIndex } from './kernel';
+import { createKernel, type ColumnDict, type KernelConfig, type KernelHit, type WordIndex } from './kernel';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -89,12 +89,81 @@ function rowReader<T>(data: T[], cfg: Required<SearchConfig<T>>): { getText: Tex
   };
 }
 
+type Dicts = Array<ColumnDict | null> | null;
+
+// Data smaller than this is scored without dictionaries.
+const DICT_MIN_ROWS = 1024;
+
+/**
+ * Dictionary-encodes every key whose texts repeat: at most one distinct text
+ * per 16 rows (and at most 65,536). A key that goes past that is dropped as
+ * soon as it does, so a key of distinct texts costs a fraction of one pass.
+ * Reads each row once. Returns `null` when no key qualifies.
+ */
+function buildDicts<T>(data: T[], cfg: Required<SearchConfig<T>>): Dicts {
+  const n = data.length;
+  if (n < DICT_MIN_ROWS) return null;
+  const names = cfg.keys.map((k) => k.name as string | number | symbol);
+  const nKeys = names.length;
+  const cap = Math.min(65536, n >>> 4);
+  const maps: Array<Map<string | null, number> | null> = [];
+  // Ids start as bytes and are widened when a key gets its 257th text.
+  const ids: Array<Uint8Array | Uint16Array | null> = [];
+  for (let k = 0; k < nKeys; k++) {
+    maps.push(new Map());
+    ids.push(new Uint8Array(n));
+  }
+  let live = nKeys;
+  for (let r = 0; r < n && live > 0; r++) {
+    const item = data[r] as Row;
+    if (item == null) continue;
+    for (let k = 0; k < nKeys; k++) {
+      const map = maps[k];
+      if (map === null) continue;
+      const text = kernel.toText(item[names[k]]);
+      let id = map.get(text);
+      if (id === undefined) {
+        if (map.size === cap) {
+          maps[k] = null;
+          ids[k] = null;
+          live--;
+          continue;
+        }
+        id = map.size;
+        map.set(text, id);
+        if (id === 256) {
+          const wide = new Uint16Array(n);
+          wide.set(ids[k]!);
+          ids[k] = wide;
+        }
+      }
+      ids[k]![r] = id;
+    }
+  }
+  if (live === 0) return null;
+  return maps.map((map, k) => {
+    if (map === null) return null;
+    const texts = [...map.keys()];
+    return {
+      ids: ids[k]!,
+      texts,
+      state: new Uint8Array(texts.length),
+      scores: new Float64Array(texts.length),
+      query: null,
+      max: 0,
+      cs: false,
+      mode: '',
+    };
+  });
+}
+
 function runSearch<T>(
   data: T[],
   query: string,
   cfg: Required<SearchConfig<T>>,
   words: WordIndex | null,
   rows: Uint32Array | null,
+  dicts: Dicts = null,
 ): SearchWithRows<T> {
   const reader = rowReader(data, cfg);
   const items: T[] = [];
@@ -106,6 +175,7 @@ function runSearch<T>(
     words,
     rows,
     () => items.push(reader.current()),
+    dicts,
   );
   return buildResults(items, hits, cfg.sortAlgorithm);
 }
@@ -329,6 +399,9 @@ export class ExSearch<T> {
   // 'word' and dropped whenever the data or the config changes.
   // `undefined` = not built yet; `null` = built, but the data is too large to index.
   private _words: WordIndex | null | undefined = undefined;
+  // Dictionaries of the keys whose texts repeat, built on the first search and
+  // dropped with the data or the config. `undefined` = not built yet.
+  private _dicts: Dicts | undefined = undefined;
 
   constructor(config: SearchConfig<T>) {
     this._config = normaliseConfig(config);
@@ -342,6 +415,7 @@ export class ExSearch<T> {
   setData(data: T[]): this {
     this._data = data;
     this._words = undefined;
+    this._dicts = undefined;
     return this;
   }
 
@@ -357,6 +431,7 @@ export class ExSearch<T> {
     }
     this._config = normaliseConfig({ ...this._config, ...defined });
     this._words = undefined;
+    this._dicts = undefined;
     return this;
   }
 
@@ -379,7 +454,8 @@ export class ExSearch<T> {
   searchWithRows(query: string, options?: SearchWithinOptions): SearchWithRows<T> {
     const rows = toRows(options?.within, this._data.length);
     if (!query.trim()) return NO_HITS();
-    return runSearch(this._data, query, this._config, this._wordIndex(), rows);
+    const dicts = this._dictionaries();
+    return runSearch(this._data, query, this._config, this._wordIndex(), rows, dicts);
   }
 
   /**
@@ -391,17 +467,29 @@ export class ExSearch<T> {
     return narrowable(prevQuery, nextQuery, this._config);
   }
 
+  /** The dictionaries of the keys whose texts repeat (built on first use), or `null` when there are none. */
+  private _dictionaries(): Dicts {
+    if (this._dicts === undefined) this._dicts = buildDicts(this._data, this._config);
+    return this._dicts;
+  }
+
+  /** The texts the word index is built from: a key with a dictionary has none (its words are found when a text is scored). */
+  private _indexedText(): TextGetter {
+    const getText = rowReader(this._data, this._config).getText;
+    const dicts = this._dictionaries();
+    if (dicts === null) return getText;
+    return (row, key) => {
+      const text = getText(row, key);
+      return dicts[key] !== null && text !== undefined ? null : text;
+    };
+  }
+
   /** The cached word index in fuzzyMode 'word' (built on first use), else `null`. */
   private _wordIndex(): WordIndex | null {
     const cfg = this._config;
     if (cfg.fuzzyMode !== 'word' || !(cfg.fuzzyMaxDistance > 0)) return null;
     if (this._words === undefined) {
-      this._words = kernel.buildWordIndex(
-        rowReader(this._data, cfg).getText,
-        this._data.length,
-        cfg.keys.length,
-        cfg.caseSensitive,
-      );
+      this._words = kernel.buildWordIndex(this._indexedText(), this._data.length, cfg.keys.length, cfg.caseSensitive);
     }
     return this._words;
   }
@@ -440,13 +528,37 @@ export class ExSearch<T> {
     // Only the projected key texts cross the thread boundary, never the rows
     // themselves, so rows holding functions, symbols or getters behave exactly
     // as in the synchronous path. With `within`, only those rows are sent.
+    // A key with a dictionary sends its distinct texts and one id per row
+    // instead of one text per row; a cell that no longer holds the text of
+    // its id is sent as a text of its own.
+    const dicts = this._dictionaries();
     const texts: Array<string | null | undefined> = [];
+    const cols: WorkerPayload['cols'] = [];
+    for (let k = 0; k < nKeys; k++) {
+      const dict = dicts === null ? null : dicts[k];
+      cols.push(dict === null ? null : { ids: new Uint32Array(count), texts: dict.texts });
+    }
     const scored: T[] = []; // the rows as read, so results are built without reading them again
     for (let i = 0; i < count; i++) {
-      const item = data[rows === null ? i : rows[i]] as Record<string | number | symbol, unknown> | null | undefined;
+      const row = rows === null ? i : rows[i];
+      const item = data[row] as Record<string | number | symbol, unknown> | null | undefined;
       scored.push(item as T);
       for (let k = 0; k < nKeys; k++) {
-        texts.push(item == null ? undefined : kernel.toText(item[names[k]]));
+        const col = cols[k];
+        if (col === null) {
+          texts.push(item == null ? undefined : kernel.toText(item[names[k]]));
+        } else if (item == null) {
+          col.ids[i] = NO_ROW;
+        } else {
+          const text = kernel.toText(item[names[k]]);
+          const id = dicts![k]!.ids[row];
+          if (col.texts[id] === text) col.ids[i] = id;
+          else {
+            if (col.texts === dicts![k]!.texts) col.texts = col.texts.slice();
+            col.ids[i] = col.texts.length;
+            col.texts.push(text);
+          }
+        }
       }
     }
     const hits = await runInWorker(
@@ -455,6 +567,7 @@ export class ExSearch<T> {
         nRows: count,
         normQuery: normalise(query, cfg.caseSensitive),
         config: toKernelConfig(cfg),
+        cols,
       },
       signal,
     );
@@ -488,11 +601,17 @@ export function createSearch<T>(config: SearchConfig<T>): ExSearch<T> {
 // owns result construction and ranking.
 
 interface WorkerPayload {
+  /** The texts of the keys without a dictionary, row by row. */
   texts: Array<string | null | undefined>;
   nRows: number;
   normQuery: string;
   config: KernelConfig;
+  /** Per key: `null`, or its texts and the id of each sent row (`NO_ROW` for a null row). */
+  cols: Array<{ ids: Uint32Array; texts: Array<string | null> } | null>;
 }
+
+// Id of a row that is `null` or `undefined`: it has no text for any key.
+const NO_ROW = 0xffffffff;
 
 /** One Blob URL per module, created lazily and kept for the page lifetime. */
 let workerUrl: string | null = null;
@@ -589,10 +708,47 @@ function workerEntry(makeKernel: typeof createKernel) {
   const k = makeKernel();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   self.onmessage = function (e: MessageEvent<any>) {
-    const { texts, nRows, normQuery, config } = e.data;
+    const { texts, nRows, normQuery, config, cols } = e.data;
     const nKeys = config.keys.length;
+    // `slot[key]` is the place of a key among those sent as texts, or -1.
+    const slot: number[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dicts: any[] = [];
+    let nPlain = 0;
+    for (let key = 0; key < nKeys; key++) {
+      const col = cols == null ? null : cols[key]; // no `cols`: every key is sent as texts
+      slot.push(col === null ? nPlain++ : -1);
+      dicts.push(
+        col === null
+          ? null
+          : {
+              ids: col.ids,
+              texts: col.texts,
+              state: new Uint8Array(col.texts.length),
+              scores: new Float64Array(col.texts.length),
+              query: null,
+              max: 0,
+              cs: false,
+              mode: '',
+            },
+      );
+    }
     // Word mode finds words on the fly: each Worker serves a single search.
-    const hits = k.scoreRows((row: number, key: number) => texts[row * nKeys + key], nRows, normQuery, config, null);
+    const hits = k.scoreRows(
+      (row: number, key: number) => {
+        const dict = dicts[key];
+        if (dict === null) return texts[row * nPlain + slot[key]];
+        const id = dict.ids[row];
+        return id === 0xffffffff ? undefined : dict.texts[id];
+      },
+      nRows,
+      normQuery,
+      config,
+      null,
+      null,
+      null,
+      dicts,
+    );
     self.postMessage(hits);
   };
 }
