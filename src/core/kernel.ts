@@ -43,6 +43,24 @@ export interface KernelConfig {
   fuzzyMode: 'value' | 'word';
 }
 
+/**
+ * The dictionary of one key whose texts repeat: `texts` are its distinct
+ * texts and `ids[row]` says which of them the row holds. The rest is the
+ * score of each text for the query it was last scored for.
+ */
+export interface ColumnDict {
+  ids: Uint8Array | Uint16Array | Uint32Array;
+  texts: Array<string | null>;
+  /** Per text: 0 when it is not scored for the current query, else 1 + the code of its match type. */
+  state: Uint8Array;
+  scores: Float64Array;
+  /** What the kept scores were computed for. */
+  query: string | null;
+  max: number;
+  cs: boolean;
+  mode: string;
+}
+
 /** A surviving row: its index, best weighted field score and per-field breakdown. */
 export interface KernelHit {
   row: number;
@@ -133,7 +151,9 @@ export function createKernel() {
   function myers(peq: Peq, m: number, text: string, from: number, to: number): number {
     const tab = peq.tab;
     const more = peq.more;
-    let Pv = m === WORD ? 0xffffffff : (1 << m) - 1;
+    // Every value stays a signed 32-bit integer: the bit patterns are the
+    // ones of the unsigned arithmetic, and no step leaves the integer range.
+    let Pv = m === WORD ? -1 : (1 << m) - 1;
     let Mv = 0;
     let score = m;
     const last = m - 1;
@@ -143,19 +163,18 @@ export function createKernel() {
       const h = c & 255;
       const Eq = tab[h] === c ? tab[256 + h] : more === null ? 0 : (more.get(c) ?? 0);
       const Xv = Eq | Mv;
-      const Xh = (((Eq & Pv) + Pv) ^ Pv) | Eq;
+      const Xh = ((((Eq & Pv) + Pv) | 0) ^ Pv) | Eq;
 
       let Ph = Mv | ~(Xh | Pv);
       let Mh = Pv & Xh;
 
-      if ((Ph >>> last) & 1) score++;
-      if ((Mh >>> last) & 1) score--;
+      score += ((Ph >>> last) & 1) - ((Mh >>> last) & 1);
 
-      Ph = ((Ph << 1) | 1) >>> 0;
-      Mh = (Mh << 1) >>> 0;
+      Ph = (Ph << 1) | 1;
+      Mh = Mh << 1;
 
-      Pv = (Mh | ~(Xv | Ph)) >>> 0;
-      Mv = (Ph & Xv) >>> 0;
+      Pv = Mh | ~(Xv | Ph);
+      Mv = Ph & Xv;
     }
 
     return score;
@@ -321,17 +340,40 @@ export function createKernel() {
    */
   function wordSpans(text: string, out: number[]): number {
     const base = out.length;
+    const count = spansAt(text, out, base);
+    out.length = base + 2 * count;
+    return count;
+  }
+
+  /**
+   * `wordSpans` that writes the offsets at `out[at]` onwards instead of
+   * appending, and leaves the length of `out` alone when it is long enough: a
+   * caller that reuses one array never has to empty it. Only the first
+   * `2 * count` numbers from `at` mean anything.
+   */
+  function spansAt(text: string, out: number[], at: number): number {
     const len = text.length;
+    let n = at;
     let i = 0;
     while (i < len) {
-      while (i < len && isSpace(text.charCodeAt(i))) i++;
+      // Code units between 33 and 159 are never whitespace: no call for them.
+      let c = text.charCodeAt(i);
+      while ((c <= 32 || c >= 0xa0) && isSpace(c)) {
+        if (++i === len) break;
+        c = text.charCodeAt(i);
+      }
       if (i === len) break;
-      const start = i;
-      while (i < len && !isSpace(text.charCodeAt(i))) i++;
-      out.push(start, i);
+      const start = i++;
+      while (i < len) {
+        c = text.charCodeAt(i);
+        if ((c <= 32 || c >= 0xa0) && isSpace(c)) break;
+        i++;
+      }
+      out[n++] = start;
+      out[n++] = i;
     }
-    if (out.length - base === 2 && out[base] === 0 && out[base + 1] === len) out.length = base;
-    return (out.length - base) / 2;
+    if (n - at === 2 && out[at] === 0 && out[at + 1] === len) return 0;
+    return (n - at) / 2;
   }
 
   /**
@@ -369,8 +411,7 @@ export function createKernel() {
         // raw text sit at the offsets of the lower-cased text, and only a text
         // with U+0130 needs the real thing here (scoring lower-cases it again).
         const text = caseSensitive || raw.indexOf('\u0130') === -1 ? raw : raw.toLowerCase();
-        scratch.length = 0;
-        const count = wordSpans(text, scratch);
+        const count = spansAt(text, scratch, 0);
         if (count === 0) continue;
 
         // At most two varints per word plus two more, 5 bytes each (a varint
@@ -456,6 +497,8 @@ export function createKernel() {
   const MATCH_CONTAINS: MatchType = 'contains';
   const MATCH_FUZZY: MatchType = 'fuzzy';
   const MATCH_NONE: MatchType = 'none';
+  // Match types by the code a dictionary keeps them as (see `ColumnDict.state`).
+  const TYPES: MatchType[] = [MATCH_NONE, MATCH_EXACT, MATCH_STARTS, MATCH_CONTAINS, MATCH_FUZZY];
 
   /**
    * Turns a field value into searchable text. Strings pass through; numbers,
@@ -491,6 +534,7 @@ export function createKernel() {
     words: WordIndex | null,
     rows?: ArrayLike<number> | null,
     onHit?: (() => void) | null,
+    cols?: Array<ColumnDict | null> | null,
   ): KernelHit[] {
     const keys = config.keys;
     const nKeys = keys.length;
@@ -524,6 +568,24 @@ export function createKernel() {
     let at = 0;
     let pos = 0;
     const count = rows == null ? nRows : rows.length;
+    // A dictionary keeps its scores from call to call while the query and
+    // what a cell's score depends on stay the same (a caller may score the
+    // rows in several calls).
+    const dicts: Array<ColumnDict | null> = [];
+    for (let k = 0; k < nKeys; k++) {
+      const col = cols != null ? (cols[k] ?? null) : null;
+      dicts.push(col);
+      if (
+        col !== null &&
+        (col.query !== normQuery || col.max !== max || col.cs !== cs || col.mode !== config.fuzzyMode)
+      ) {
+        col.state.fill(0);
+        col.query = normQuery;
+        col.max = max;
+        col.cs = cs;
+        col.mode = config.fuzzyMode;
+      }
+    }
 
     for (let i = 0; i < count; i++) {
       const r = rows == null ? i : rows[i];
@@ -534,12 +596,28 @@ export function createKernel() {
         if (raw === undefined && k === 0) break;
         let type = MATCH_NONE;
         let score = 0;
+        // The cell is scored from its dictionary when it still holds the text
+        // its id stands for; `keep` is where a freshly computed score goes.
+        const col = dicts[k];
+        let known = false;
+        let keep = -1;
+        if (col !== null) {
+          const id = col.ids[r];
+          if (col.texts[id] === raw) {
+            const state = col.state[id];
+            if (state !== 0) {
+              type = TYPES[state - 1];
+              score = col.scores[id];
+              known = true;
+            } else keep = id;
+          }
+        }
 
-        if (typeof raw === 'string') {
+        if (!known && typeof raw === 'string') {
           const text = cs ? raw : raw.toLowerCase();
           // One search answers the three exact tiers: where the query first
           // occurs says whether the text is it, starts with it or contains it.
-          const found = text.indexOf(normQuery);
+          const found = text.length < qLen ? -1 : text.indexOf(normQuery);
           if (found === 0) {
             if (text.length === qLen) {
               type = MATCH_EXACT;
@@ -559,9 +637,9 @@ export function createKernel() {
             }
             if (wordMode) {
               let ws = 0;
-              if (words === null) {
-                live.length = 0;
-                const n = wordSpans(text, live);
+              // A key with a dictionary has no entries in the word index.
+              if (words === null || col !== null) {
+                const n = spansAt(text, live, 0);
                 for (let w = 0; w < n; w++) {
                   const s = wordScore(match(text, live[2 * w], live[2 * w + 1]), live[2 * w + 1] - live[2 * w]);
                   if (s > ws) ws = s;
@@ -679,6 +757,20 @@ export function createKernel() {
               }
             }
           }
+        }
+
+        if (keep >= 0) {
+          col!.state[keep] =
+            type === MATCH_NONE
+              ? 1
+              : type === MATCH_EXACT
+                ? 2
+                : type === MATCH_STARTS
+                  ? 3
+                  : type === MATCH_CONTAINS
+                    ? 4
+                    : 5;
+          col!.scores[keep] = score;
         }
 
         types[k] = type;
