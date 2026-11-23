@@ -28,23 +28,31 @@ function toKernelConfig<T>(cfg: Required<SearchConfig<T>>): KernelConfig {
 }
 
 /**
- * Ranks the hits and builds the public result objects from the original rows.
- * `rows[i]` is the data index of `results[i]`. Hits are ranked (not the result
- * objects), with the same keys, so the order is the one ranking results gives.
+ * Ranks the hits and builds the public result objects. `items[i]` is the row
+ * object of `hits[i]`, so no row is read from the data again. `rows[i]` is the
+ * data index of `results[i]`. Hits are ranked (not the result objects), with
+ * the same keys, so the order is the one ranking results gives.
  */
-function buildResults<T>(data: T[], hits: KernelHit[], algorithm: 'radix' | 'tim'): SearchWithRows<T> {
+function buildResults<T>(items: T[], hits: KernelHit[], algorithm: 'radix' | 'tim'): SearchWithRows<T> {
+  // Ranking moves the hits, so while ranked each one carries its place in `items`.
+  const n = hits.length;
+  const dataRows = new Uint32Array(n);
+  for (let i = 0; i < n; i++) {
+    dataRows[i] = hits[i].row;
+    hits[i].row = i;
+  }
   const ranked = sortDescending(hits, algorithm);
   const results: SearchResult<T>[] = [];
-  const rows = new Uint32Array(ranked.length);
-  for (let i = 0; i < ranked.length; i++) {
+  const rows = new Uint32Array(n);
+  for (let i = 0; i < n; i++) {
     const hit = ranked[i];
     // Spread (not Object.assign) so an own "__proto__" key stays a plain property.
-    const result = { ...(data[hit.row] as object) } as Record<string, unknown>;
+    const result = { ...(items[hit.row] as object) } as Record<string, unknown>;
     result.exFlowPriority = Math.round(hit.best);
     result.score = hit.score;
     result.fieldMatches = hit.fieldMatches;
     results.push(result as SearchResult<T>);
-    rows[i] = hit.row;
+    rows[i] = dataRows[hit.row];
   }
   return { results, rows };
 }
@@ -57,12 +65,27 @@ function normalise(query: string, caseSensitive: boolean): string {
 }
 
 type TextGetter = (row: number, key: number) => string | null | undefined;
+type Row = Record<string | number | symbol, unknown> | null | undefined;
 
-function textGetter<T>(data: T[], cfg: Required<SearchConfig<T>>): TextGetter {
+/**
+ * The kernel's view of `data`. The kernel asks for every key of a row before
+ * it moves on, so the row is read once and kept: an index read of `data` may
+ * not be free (a Proxy, an array-like with getters). `current()` is the row of
+ * the last `getText`.
+ */
+function rowReader<T>(data: T[], cfg: Required<SearchConfig<T>>): { getText: TextGetter; current: () => T } {
   const names = cfg.keys.map((k) => k.name as string | number | symbol);
-  return (row, key) => {
-    const item = data[row] as Record<string | number | symbol, unknown> | null | undefined;
-    return item == null ? undefined : kernel.toText(item[names[key]]);
+  let last = -1;
+  let item: Row;
+  return {
+    getText: (row, key) => {
+      if (row !== last) {
+        last = row;
+        item = data[row] as Row;
+      }
+      return item == null ? undefined : kernel.toText(item[names[key]]);
+    },
+    current: () => item as T,
   };
 }
 
@@ -73,15 +96,18 @@ function runSearch<T>(
   words: WordIndex | null,
   rows: Uint32Array | null,
 ): SearchWithRows<T> {
+  const reader = rowReader(data, cfg);
+  const items: T[] = [];
   const hits = kernel.scoreRows(
-    textGetter(data, cfg),
+    reader.getText,
     data.length,
     normalise(query, cfg.caseSensitive),
     toKernelConfig(cfg),
     words,
     rows,
+    () => items.push(reader.current()),
   );
-  return buildResults(data, hits, cfg.sortAlgorithm);
+  return buildResults(items, hits, cfg.sortAlgorithm);
 }
 
 /**
@@ -371,7 +397,7 @@ export class ExSearch<T> {
     if (cfg.fuzzyMode !== 'word' || !(cfg.fuzzyMaxDistance > 0)) return null;
     if (this._words === undefined) {
       this._words = kernel.buildWordIndex(
-        textGetter(this._data, cfg),
+        rowReader(this._data, cfg).getText,
         this._data.length,
         cfg.keys.length,
         cfg.caseSensitive,
@@ -415,8 +441,10 @@ export class ExSearch<T> {
     // themselves, so rows holding functions, symbols or getters behave exactly
     // as in the synchronous path. With `within`, only those rows are sent.
     const texts: Array<string | null | undefined> = [];
+    const scored: T[] = []; // the rows as read, so results are built without reading them again
     for (let i = 0; i < count; i++) {
       const item = data[rows === null ? i : rows[i]] as Record<string | number | symbol, unknown> | null | undefined;
+      scored.push(item as T);
       for (let k = 0; k < nKeys; k++) {
         texts.push(item == null ? undefined : kernel.toText(item[names[k]]));
       }
@@ -431,8 +459,14 @@ export class ExSearch<T> {
       signal,
     );
     if (hits === null) return this.searchWithRows(query, within); // Worker unusable: same answer, synchronously
-    if (rows !== null) for (const hit of hits) hit.row = rows[hit.row];
-    return buildResults(data, hits, cfg.sortAlgorithm);
+    // A hit's row counts the rows that were sent: take its row object, then
+    // give it its data index.
+    const items: T[] = [];
+    for (const hit of hits) {
+      items.push(scored[hit.row]);
+      if (rows !== null) hit.row = rows[hit.row];
+    }
+    return buildResults(items, hits, cfg.sortAlgorithm);
   }
 }
 
