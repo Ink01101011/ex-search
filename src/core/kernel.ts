@@ -78,28 +78,70 @@ export function createKernel() {
   let rowA = new Int32Array(64);
   let rowB = new Int32Array(64);
 
-  /** peq[c] = bitmask of the positions in `pattern` where character c occurs. */
-  function buildPeq(pattern: string): Map<string, number> {
-    const peq = new Map<string, number>();
+  /**
+   * The query's bitmask table: for a UTF-16 code unit `c`, the positions of
+   * the pattern where `c` occurs. Slot `c & 255` of `tab` holds the code unit
+   * and slot `256 + (c & 255)` its mask; the few code units of a pattern that
+   * share a slot with an earlier one go to `more`.
+   */
+  interface Peq {
+    tab: Int32Array;
+    more: Map<number, number> | null;
+  }
+
+  function buildPeq(pattern: string): Peq {
+    const tab = new Int32Array(512);
+    tab.fill(-1, 0, 256);
+    return fillPeq({ tab, more: null }, pattern);
+  }
+
+  /** Adds `pattern` to an empty table. */
+  function fillPeq(peq: Peq, pattern: string): Peq {
+    const tab = peq.tab;
     for (let i = 0; i < pattern.length; i++) {
-      const c = pattern[i];
-      peq.set(c, (peq.get(c) ?? 0) | (1 << i));
+      const c = pattern.charCodeAt(i);
+      const h = c & 255;
+      if (tab[h] === -1) tab[h] = c;
+      if (tab[h] === c) tab[256 + h] |= 1 << i;
+      else {
+        if (peq.more === null) peq.more = new Map();
+        peq.more.set(c, (peq.more.get(c) ?? 0) | (1 << i));
+      }
     }
     return peq;
   }
+
+  /** Empties a table that holds `pattern`, touching only the slots it used. */
+  function clearPeq(peq: Peq, pattern: string): void {
+    const tab = peq.tab;
+    for (let i = 0; i < pattern.length; i++) {
+      const h = pattern.charCodeAt(i) & 255;
+      tab[h] = -1;
+      tab[256 + h] = 0;
+    }
+    peq.more = null;
+  }
+
+  // Table of the one-off comparisons (`levenshtein`), emptied after each one.
+  // The kernel is synchronous, so one is enough. A matcher keeps its own.
+  const onceOnly = buildPeq('');
 
   /**
    * Myers (1999) bit-parallel global edit distance between a pattern of length
    * `m` (1 ≤ m ≤ 32, encoded in `peq`) and `text.slice(from, to)` of any length.
    */
-  function myers(peq: Map<string, number>, m: number, text: string, from: number, to: number): number {
+  function myers(peq: Peq, m: number, text: string, from: number, to: number): number {
+    const tab = peq.tab;
+    const more = peq.more;
     let Pv = m === WORD ? 0xffffffff : (1 << m) - 1;
     let Mv = 0;
     let score = m;
     const last = m - 1;
 
     for (let j = from; j < to; j++) {
-      const Eq = peq.get(text[j]) ?? 0;
+      const c = text.charCodeAt(j);
+      const h = c & 255;
+      const Eq = tab[h] === c ? tab[256 + h] : more === null ? 0 : (more.get(c) ?? 0);
       const Xv = Eq | Mv;
       const Xh = (((Eq & Pv) + Pv) ^ Pv) | Eq;
 
@@ -201,7 +243,11 @@ export function createKernel() {
       a = b;
       b = t;
     }
-    if (a.length <= WORD) return myers(buildPeq(a), a.length, b, 0, b.length);
+    if (a.length <= WORD) {
+      const d = myers(fillPeq(onceOnly, a), a.length, b, 0, b.length);
+      clearPeq(onceOnly, a);
+      return d;
+    }
     return banded(a, b, b.length);
   }
 
@@ -433,7 +479,9 @@ export function createKernel() {
    * In `fuzzyMode: 'word'` the words come from `words` (built by
    * `buildWordIndex` over the same texts) or, when it is `null`, are found on
    * the fly. `rows`, when given, lists the only rows to score (ascending,
-   * unique, each `< nRows`); hits keep their original row index.
+   * unique, each `< nRows`); hits keep their original row index. `onHit`, when
+   * given, is called once per hit, in the order of the returned hits, after
+   * the last `getText` of that row and before the first of the next one.
    */
   function scoreRows(
     getText: (row: number, key: number) => string | null | undefined,
@@ -442,6 +490,7 @@ export function createKernel() {
     config: KernelConfig,
     words: WordIndex | null,
     rows?: ArrayLike<number> | null,
+    onHit?: (() => void) | null,
   ): KernelHit[] {
     const keys = config.keys;
     const nKeys = keys.length;
@@ -488,13 +537,18 @@ export function createKernel() {
 
         if (typeof raw === 'string') {
           const text = cs ? raw : raw.toLowerCase();
-          if (text === normQuery) {
-            type = MATCH_EXACT;
-            score = 100;
-          } else if (text.startsWith(normQuery)) {
-            type = MATCH_STARTS;
-            score = 80;
-          } else if (text.includes(normQuery)) {
+          // One search answers the three exact tiers: where the query first
+          // occurs says whether the text is it, starts with it or contains it.
+          const found = text.indexOf(normQuery);
+          if (found === 0) {
+            if (text.length === qLen) {
+              type = MATCH_EXACT;
+              score = 100;
+            } else {
+              type = MATCH_STARTS;
+              score = 80;
+            }
+          } else if (found > 0) {
             type = MATCH_CONTAINS;
             score = 65;
           } else if (fuzzyOn) {
@@ -583,34 +637,38 @@ export function createKernel() {
                     start = readVarint(data);
                     p = vp;
                   }
-                  while (p < stop) {
-                    let gap = data[p++];
-                    if (gap > 127) {
-                      vp = p - 1;
-                      gap = readVarint(data);
-                      p = vp;
-                    }
-                    // The word ends where the whitespace before the next word
-                    // begins: one code unit back, or as many as the entry says.
-                    const next = start + (gap >>> 1);
-                    let end = next - 1;
-                    if (gap & 1) {
-                      let sep = data[p++];
-                      if (sep > 127) {
+                  // One pass per word. Every word but the last ends where the
+                  // whitespace before the next word begins: one code unit
+                  // back, or as many as the entry says. The last word runs to
+                  // the end of the text, less any trailing whitespace.
+                  for (;;) {
+                    const more = p < stop;
+                    let next = 0;
+                    let end = text.length - tail;
+                    if (more) {
+                      let gap = data[p++];
+                      if (gap > 127) {
                         vp = p - 1;
-                        sep = readVarint(data);
+                        gap = readVarint(data);
                         p = vp;
                       }
-                      end = next - sep;
+                      next = start + (gap >>> 1);
+                      end = next - 1;
+                      if (gap & 1) {
+                        let sep = data[p++];
+                        if (sep > 127) {
+                          vp = p - 1;
+                          sep = readVarint(data);
+                          p = vp;
+                        }
+                        end = next - sep;
+                      }
                     }
                     const s = wordScore(match(text, start, end), end - start);
                     if (s > ws) ws = s;
+                    if (!more) break;
                     start = next;
                   }
-                  // The last word runs to the end, less any trailing whitespace.
-                  const end = text.length - tail;
-                  const s = wordScore(match(text, start, end), end - start);
-                  if (s > ws) ws = s;
                   at = j + 1;
                   pos = stop;
                 }
@@ -644,6 +702,7 @@ export function createKernel() {
         });
       }
       hits.push({ row: r, best, score: total, fieldMatches });
+      if (onHit != null) onHit();
     }
 
     return hits;
